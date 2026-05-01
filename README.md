@@ -4,7 +4,7 @@ Automated DICOM reception with PatientID-based sorting and Zstd compression.
 Receives studies via `storescp`, then compresses them into `.tar.zst` archives
 organised by PatientID under your home directory.
 
----
+![Data flow: scanner → storescp → archive_study.py → local archive + optional SSH mirror](schematic.png)
 
 ## Prerequisites
 
@@ -13,16 +13,14 @@ organised by PatientID under your home directory.
 | DCMTK | `brew install dcmtk` | `sudo apt install dcmtk` |
 | Python 3 | ships with macOS | `sudo apt install python3 python3-venv` |
 
----
 
 ## Installation
 
-### Step 1 — Clone or download the project
+### Step 1 — Get the project
 
-```bash
-cd ~
-# unzip the archive if you received a .zip, or clone your repo here
-```
+Clone or download the repository, then `cd` into its root. The rest of this
+README assumes commands run from the project root (the directory containing
+`scripts/` and `DICOMs/`).
 
 ### Step 2 — Create a Python virtual environment
 
@@ -93,8 +91,8 @@ If `which storescp` returns nothing, DCMTK is not installed — go back to Step 
 >
 > **Why `-i.bak`?**  
 > macOS (BSD sed) and Linux (GNU sed) handle in-place editing slightly
-> differently. The `.bak` suffix satisfies both. A backup is written as
-> `start_storescp.sh.bak`; you can delete it once you've verified the result.
+> differently. The `.bak` suffix satisfies both. The resulting
+> `start_storescp.sh.bak` is gitignored.
 >
 > After this step the script is fully self-contained. You do **not** need to
 > activate the venv before running it — all paths are absolute.
@@ -124,8 +122,6 @@ Verify the entry was added:
 crontab -l
 ```
 
----
-
 ## macOS-specific: Full Disk Access
 
 macOS blocks background processes from writing to your Home folder by default.
@@ -136,7 +132,6 @@ Grant access **before** testing:
 3. Add `/usr/sbin/cron`
 4. Add **Terminal.app** (or whatever terminal emulator you use)
 
----
 
 ## Testing
 
@@ -149,35 +144,165 @@ Grant access **before** testing:
 **2. Send a test study** (from another terminal):
 
 ```bash
-storescu localhost 11112 -aet SCANNER -aec PY_STORE_SCP +sd ./DICOMs
+storescu localhost 11112 -aet SCANNER -aec PY_STORE_SCP ./DICOMs/*.dcm
 ```
+
+> Don't use `+sd ./DICOMs` here: on macOS Finder leaves `.DS_Store` files in
+> the directory and `storescu` aborts trying to parse them. The `*.dcm` glob
+> sidesteps that.
 
 **3. Verify output:**
 
-Check for a `.tar.zst` archive in `~/patientid/` (matched PatientID) or `~/guest/`
-(unknown PatientID):
+The bundled `DICOMs/MR.dcm` has `PatientID=crlab`. The script falls back to
+`~/guest/` whenever `~/<PatientID>/` does not exist locally — so unless you
+ran `mkdir ~/crlab` first, the archive lands in `~/guest/`:
 
 ```bash
-ls -lh ~/guest/
-# or
-ls -lh ~/<PatientID>/
+ls -lh ~/guest/                # default landing zone for the bundled demo
+ls -lh ~/crlab/                # only if you mkdir'd it first
 ```
 
----
+
+## Optional: preferred network transfer syntax
+
+`storescp` negotiates a transfer syntax with each sender. By default it
+prefers uncompressed; you can ask it to prefer something else via the
+`PREFER_TS` variable near the top of `start_storescp.sh`:
+
+```bash
+# scripts/start_storescp.sh
+PREFER_TS="--prefer-lossless"   # default in this repo — JPEG lossless when offered
+# PREFER_TS=""                  # storescp default (uncompressed)
+# PREFER_TS="--prefer-j2k-lossless"
+# PREFER_TS="--prefer-rle"
+# PREFER_TS="--accept-all"
+```
+
+The sender still has to *offer* the chosen syntax for it to be selected; if
+not, `storescp` falls back to the next acceptable presentation context. See
+[storescp(1) on the DCMTK site](https://support.dcmtk.org/docs/storescp.html)
+for the full list of `--prefer-*` flags.
+
+> **Why default to `--prefer-lossless`?** Modalities that can offer JPEG
+> lossless will negotiate it, cutting transfer size and on-disk size before
+> our own zstd pass — without altering pixel data. Receivers that can't offer
+> it are unaffected.
+
+
+## Optional: mirror archives to a remote SSH server
+
+Once a `.tar.zst` is written locally, it can be copied to a matching folder on
+a remote server (e.g. a NAS or shared workstation). The mirror is **off by
+default** — drop a config file in place to enable it. If the config is absent
+or the remote is unreachable, local archiving is unaffected.
+
+### How destination resolution works
+
+For `PatientID = jflab`, the script probes a list of candidate roots on the
+remote — `/volume1/home`, `/home`, `/Users` — and uses the first one that
+contains a folder named `jflab`. If none of them do, it falls back to a
+same-named `guest` folder under those roots. This means the same fallback
+semantics apply on both sides — the script does **not** create new home
+folders, and it does not depend on `getent passwd` (which on Synology returns
+`/nonexistent` for the system `guest` account, distinct from `/volume1/home/guest`).
+
+The probe list is hard-coded near the top of `archive_study.py` as
+`REMOTE_HOME_ROOTS`; edit it if your server keeps homes elsewhere.
+
+After SCP completes:
+- Files in `~guest/` are chmod-ed to `0666` (everyone read/write).
+- Files in user folders (`~jflab/`, `~crlab/`, …) are chmod-ed to `0664`
+  (group read/write, others read).
+
+### Step 1 — Configure the connection
+
+Create `~/.config/dicompress/config.json` on the machine that runs
+`archive_study.py` (the same user that owns the local archives):
+
+```bash
+mkdir -p ~/.config/dicompress
+cp ./scripts/config.example.json ~/.config/dicompress/config.json
+# then edit host / port / user to match your server
+```
+
+Example:
+
+```json
+{
+  "ssh": {
+    "host": "192.0.2.0",
+    "port": 22,
+    "user": "mradmin"
+  }
+}
+```
+
+The configured user should be an administrator on the remote. To remove the
+mirror, delete the file (or the `ssh` section).
+
+### Step 2 — Install a passwordless SSH key
+
+`archive_study.py` runs non-interactively (`BatchMode=yes`), so password and
+host-key prompts will fail. Push your local public key to the remote once:
+
+```bash
+cat ~/.ssh/id_ed25519.pub | ssh mradmin@192.0.2.0 \
+  "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+```
+
+If you don't yet have a key pair, create one with `ssh-keygen -t ed25519`
+first. Verify with `ssh -p 22 mradmin@192.0.2.0 true` — it must succeed
+without prompting.
+
+### Step 3 — Make user folders writable by the admin
+
+By default, user home folders on the remote are mode `755` and owned by the
+user — so the admin account cannot SCP into them. Change the group to
+`administrators` and add the setgid bit so files inherit the right group:
+
+```bash
+# run on the remote, as the admin user
+sudo chgrp administrators ~jflab && sudo chmod 2775 ~jflab
+sudo chgrp administrators ~crlab && sudo chmod 2775 ~crlab
+# repeat for each lab folder you want to mirror into
+```
+
+Verify (note the `s` in the group bits, indicating setgid):
+
+```
+drwxrwsr-x  4 crlab  administrators  ...  crlab/
+drwxrwsr-x  2 jflab  administrators  ...  jflab/
+drwxrwsrwx  2 mradmin users           ...  guest/
+```
+
+> On Synology DSM the admin group is named `administrators` (not `administ` —
+> that's just how `ls -l` truncates the column). Confirm with `id` or
+> `getent group | grep ^admin`.
+
+The `~guest/` folder needs to be world-writable so unknown PatientIDs land
+there:
+
+```bash
+sudo chmod 2777 ~guest
+```
+
 
 ## Project layout
 
 ```
 .
 ├── README.md
-├── venv/                        # created by you in Step 2 (not committed to git)
+├── LICENSE
+├── .gitignore                   # ignores venv/, *.bak, .DS_Store
+├── schematic.png                # diagram embedded at the top of the README
+├── DICOMs/                      # one demo DICOM (PatientID=crlab) for `Testing`
+├── venv/                        # created by you in Step 2 (gitignored)
 └── scripts/
     ├── requirements.txt         # pydicom, zstandard
     ├── start_storescp.sh        # launches storescp, set PYTHON_BIN here
-    └── archive_study.py         # sorts & compresses each completed study
+    ├── archive_study.py         # sorts & compresses each completed study
+    └── config.example.json      # template for ~/.config/dicompress/config.json
 ```
-
----
 
 ## Troubleshooting
 
@@ -187,4 +312,8 @@ ls -lh ~/<PatientID>/
 | `Permission denied` writing to home dir | macOS Full Disk Access | See macOS section above |
 | `storescp: command not found` | DCMTK not installed or not on PATH | Reinstall DCMTK; confirm with `which storescp` |
 | cron job doesn't run | cron daemon not running | macOS: `sudo cron` is started on demand. Linux: `systemctl status cron` |
-| Archive lands in `~/guest/` | PatientID not found on disk | Create `~/<PatientID>/` directory before sending |
+| Archive lands in `~/guest/` despite a matching local user folder | `~/<PatientID>/` doesn't exist or wasn't readable when the script ran | Confirm the folder exists; on macOS check Full Disk Access. (Falling through to `~/guest/` is *expected* when no matching folder exists — see the Testing section.) |
+| `SSH mirror: could not resolve remote directory …` | Host unreachable, key not installed, or no folder named `<PatientID>` or `guest` under any of `REMOTE_HOME_ROOTS` | Test with `ssh -o BatchMode=yes -p <port> <user>@<host> true`; (re)install pubkey per the SSH section; check `/volume1/home`, `/home`, `/Users` for the expected folder |
+| `SSH mirror: scp failed; skipping chmod.` | Network blip, or admin lacks write access to the resolved folder | Re-run the `chgrp administrators && chmod 2775` step on that folder |
+| Mirror lands in `~guest/` despite a matching user folder on the remote | The folder lives under a root not in `REMOTE_HOME_ROOTS` | Edit the `REMOTE_HOME_ROOTS` tuple near the top of `archive_study.py` |
+| `scp: Permission denied` to a user folder | Folder still owned by user with mode 755 | Run the `chgrp administrators` + `chmod 2775` commands on that folder |

@@ -1,0 +1,8 @@
+# sed -i.bak leftovers from the README's auto-configure step
+*.bak
+
+# Python virtual environment created during install
+venv/
+
+# OS detritus
+.DS_Store
