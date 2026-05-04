@@ -189,6 +189,28 @@ for the full list of `--prefer-*` flags.
 > it are unaffected.
 
 
+## Optional: change the local archive root
+
+By default the script writes archives under the running user's home directory
+(`Path.home() / <PatientID>` or `… / guest`). Drop a `base_dir` into
+`~/.config/dicompress/config.json` to point somewhere else:
+
+```json
+{
+  "base_dir": "/home"
+}
+```
+
+With `"base_dir": "/home"`, archives land in `/home/<PatientID>/` (e.g.
+`/home/crlab/…`) or `/home/guest/` instead of under `/home/<user>/`. Useful
+when a service account like `radmin` runs the receiver but the per-lab
+folders live at the system root. The path must already exist and be writable
+by the running user (the script does **not** create the root, only the
+`guest` fallback inside it).
+
+This setting and the `ssh` block below can coexist in the same config file.
+
+
 ## Optional: mirror archives to a remote SSH server
 
 Once a `.tar.zst` is written locally, it can be copied to a matching folder on

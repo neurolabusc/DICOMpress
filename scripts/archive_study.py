@@ -13,10 +13,20 @@ from datetime import datetime
 from pathlib import Path
 
 # --- Configuration ---
-BASE_DIR = Path.home()
-GUEST_DIR = BASE_DIR / "guest"
 TEMP_DICOM_ROOT = Path("/tmp/dicom_incoming") # Should match storescp -od
 CONFIG_PATH = Path.home() / ".config" / "dicompress" / "config.json"
+
+# Read config once at import. A malformed JSON config raises here, so a
+# typo in the file fails loudly instead of silently disabling features.
+try:
+    CONFIG = json.loads(CONFIG_PATH.read_text())
+except FileNotFoundError:
+    CONFIG = {}
+
+# Optional "base_dir" config overrides the default ~. Lets a service account
+# (e.g. radmin) write archives to a system-wide root like /home or /srv/dicom.
+BASE_DIR = Path(CONFIG.get("base_dir") or str(Path.home()))
+GUEST_DIR = BASE_DIR / "guest"
 
 def sanitize(text):
     """Replaces illegal filesystem characters with underscores."""
@@ -102,13 +112,8 @@ def _resolve_remote_dir(ssh_cfg, patient_id):
 
 
 def mirror_to_ssh(local_path, patient_id):
-    """Optionally mirror the archive to a remote SSH server. No-op if config is absent.
-    A malformed config raises — better loud than silently disabling the mirror."""
-    try:
-        cfg = json.loads(CONFIG_PATH.read_text())
-    except FileNotFoundError:
-        return
-    ssh_cfg = cfg.get("ssh") or {}
+    """Optionally mirror the archive to a remote SSH server. No-op if not configured."""
+    ssh_cfg = CONFIG.get("ssh") or {}
     if not ssh_cfg.get("host") or not ssh_cfg.get("user"):
         return
 

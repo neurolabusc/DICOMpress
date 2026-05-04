@@ -6,3 +6,6 @@ venv/
 
 # OS detritus
 .DS_Store
+
+# Project-local Claude Code agent settings
+.claude/
