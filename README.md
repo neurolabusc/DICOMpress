@@ -318,10 +318,13 @@ sudo chmod 2777 ~guest
 ```
 .
 ├── README.md
+├── CLAUDE.md                    # notes for AI assistants working on the repo
 ├── LICENSE
 ├── .gitignore                   # ignores venv/, *.bak, .DS_Store
 ├── schematic.png                # diagram embedded at the top of the README
 ├── DICOMs/                      # one demo DICOM (PatientID=crlab) for `Testing`
+├── docs/
+│   └── asustor-mirror.md        # ASUSTOR ADM specifics for the SSH-mirror target
 ├── venv/                        # created by you in Step 2 (gitignored)
 └── scripts/
     ├── requirements.txt         # pydicom, zstandard
@@ -329,6 +332,50 @@ sudo chmod 2777 ~guest
     ├── archive_study.py         # sorts & compresses each completed study
     └── config.example.json      # template for ~/.config/dicompress/config.json
 ```
+
+
+## Deployment notes (service account)
+
+The single-user install above (your own login, your own home directory) is
+fine for a workstation. For a shared lab receiver you usually want a
+dedicated service account that owns the receiver and writes archives into
+pre-existing per-lab folders. Two adjustments:
+
+**1. Service-account venv.** Create the venv inside the service user's home
+(no system-wide pip install needed):
+
+```bash
+sudo useradd -m -s /bin/bash mradmin   # (or use an existing admin account)
+sudo -u mradmin python3 -m venv /home/mradmin/DICOMpress-venv
+sudo -u mradmin /home/mradmin/DICOMpress-venv/bin/pip install pydicom zstandard
+# then point start_storescp.sh's PYTHON_BIN at /home/mradmin/DICOMpress-venv/bin/python3
+```
+
+**2. Auto-start under that account.** Add `@reboot` to the service user's
+own crontab (not root's):
+
+```bash
+sudo -u mradmin crontab -l 2>/dev/null > /tmp/cron
+echo "@reboot /bin/bash /usr/local/bin/start_storescp.sh > /home/mradmin/storescp.log 2>&1" >> /tmp/cron
+sudo -u mradmin crontab /tmp/cron && rm /tmp/cron
+```
+
+**3. Per-lab folder perms (local).** With `"base_dir": "/home"` in
+`config.json`, archives land in `/home/<PatientID>/`. The service account
+must be able to write there — same setgid trick as the SSH mirror section,
+applied locally:
+
+```bash
+sudo chgrp <admin-group> /home/crlab && sudo chmod 2775 /home/crlab
+# repeat for each lab; <admin-group> is whatever group mradmin belongs to
+```
+
+**4. Mirror target on a NAS.** If the mirror target is an ASUSTOR ADM box,
+see [docs/asustor-mirror.md](docs/asustor-mirror.md) — `/etc/init.d/` is
+regenerated at every boot on ADM, so any persistent customisation has to go
+in `/usr/local/etc/init.d/`. That doc also covers the `/home/<lab>/guest`
+bind-mount pattern that makes the shared `guest/` folder visible inside
+each lab user's Samba home.
 
 ## Troubleshooting
 

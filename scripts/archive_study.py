@@ -17,10 +17,17 @@ TEMP_DICOM_ROOT = Path("/tmp/dicom_incoming") # Should match storescp -od
 CONFIG_PATH = Path.home() / ".config" / "dicompress" / "config.json"
 
 # Read config once at import. A missing file is fine (no mirror, default
-# base_dir); a malformed JSON file logs a warning and the script continues
-# with an empty config so local archiving still works.
+# base_dir). Malformed JSON or a group/world-writable config file logs a
+# warning and the script continues with an empty config so local archiving
+# still works. The mode check matches sshd's policy on key files: anyone who
+# can write to config.json could redirect the mirror or change base_dir.
 try:
-    CONFIG = json.loads(CONFIG_PATH.read_text())
+    _st = CONFIG_PATH.stat()
+    if _st.st_mode & 0o022:  # any group-write or world-write bit set
+        print(f"Warning: {CONFIG_PATH} is group/world writable; refusing to load (run: chmod 600 {CONFIG_PATH}).")
+        CONFIG = {}
+    else:
+        CONFIG = json.loads(CONFIG_PATH.read_text())
 except FileNotFoundError:
     CONFIG = {}
 except json.JSONDecodeError as e:
@@ -29,8 +36,9 @@ except json.JSONDecodeError as e:
 
 # Optional "base_dir" config overrides the default ~. Lets a service account
 # (e.g. mradmin) write archives to a system-wide root like /home or /srv/dicom.
-# A missing or non-directory value falls back to home rather than auto-creating
-# system paths from a typo'd config.
+# A missing/empty/non-directory value falls back to home rather than
+# auto-creating system paths from a typo'd config. Note: `or` (not
+# `get(key, default)`) is used so an empty-string value also falls through.
 BASE_DIR = Path(CONFIG.get("base_dir") or str(Path.home()))
 if not BASE_DIR.is_dir():
     print(f"Warning: base_dir {BASE_DIR} is not a directory; falling back to home.")
@@ -170,8 +178,10 @@ def process_study(study_dir):
         if not patient_id or patient_id.startswith((".", "-")) or ".." in patient_id:
             patient_id = "guest"
         patient_name = sanitize(getattr(ds, 'PatientName', 'unknown'))
-        study_date = str(getattr(ds, 'StudyDate', '00000000'))
-        study_time = str(getattr(ds, 'StudyTime', '000000'))[:6]
+        # Strip non-digits — DICOM rarely has them, but a stray '/' would
+        # turn the archive_name into an unintended subdirectory.
+        study_date = re.sub(r'[^0-9]', '', str(getattr(ds, 'StudyDate', '00000000')))
+        study_time = re.sub(r'[^0-9]', '', str(getattr(ds, 'StudyTime', '000000')))[:6]
     except Exception as e:
         print(f"Error reading DICOM: {e}")
         return
