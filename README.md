@@ -203,10 +203,14 @@ By default the script writes archives under the running user's home directory
 
 With `"base_dir": "/home"`, archives land in `/home/<PatientID>/` (e.g.
 `/home/crlab/…`) or `/home/guest/` instead of under `/home/<user>/`. Useful
-when a service account like `radmin` runs the receiver but the per-lab
+when a service account like `mradmin` runs the receiver but the per-lab
 folders live at the system root. The path must already exist and be writable
-by the running user (the script does **not** create the root, only the
-`guest` fallback inside it).
+by the running user — if it doesn't, the script logs a warning and falls back
+to `Path.home()` (rather than silently creating system paths from a typo).
+The script does **not** create the root, only the `guest` fallback inside it.
+
+For the running user to write into pre-existing user folders like `/home/crlab/`,
+the same setgid trick used for the SSH mirror works locally: `sudo chgrp <admin-group> /home/crlab && sudo chmod 2775 /home/crlab`.
 
 This setting and the `ssh` block below can coexist in the same config file.
 
@@ -339,3 +343,5 @@ sudo chmod 2777 ~guest
 | `SSH mirror: scp failed; skipping chmod.` | Network blip, or admin lacks write access to the resolved folder | Re-run the `chgrp administrators && chmod 2775` step on that folder |
 | Mirror lands in `~guest/` despite a matching user folder on the remote | The folder lives under a root not in `REMOTE_HOME_ROOTS` | Edit the `REMOTE_HOME_ROOTS` tuple near the top of `archive_study.py` |
 | `scp: Permission denied` to a user folder | Folder still owned by user with mode 755 | Run the `chgrp administrators` + `chmod 2775` commands on that folder |
+| Studies stop archiving and pile up in `/tmp/dicom_incoming/` | `config.json` is malformed; `archive_study.py` logs `Warning: malformed …` and continues without the mirror but you'll only see it in storescp's stderr | Validate: `python3 -m json.tool ~/.config/dicompress/config.json` |
+| `Warning: base_dir … is not a directory; falling back to home.` in storescp log | `"base_dir"` in config points at a missing path | Create it (`sudo mkdir -p <path>`) and ensure the running user can write to it; or remove the `base_dir` key |

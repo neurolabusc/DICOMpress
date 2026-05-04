@@ -16,37 +16,35 @@ from pathlib import Path
 TEMP_DICOM_ROOT = Path("/tmp/dicom_incoming") # Should match storescp -od
 CONFIG_PATH = Path.home() / ".config" / "dicompress" / "config.json"
 
-# Read config once at import. A malformed JSON config raises here, so a
-# typo in the file fails loudly instead of silently disabling features.
+# Read config once at import. A missing file is fine (no mirror, default
+# base_dir); a malformed JSON file logs a warning and the script continues
+# with an empty config so local archiving still works.
 try:
     CONFIG = json.loads(CONFIG_PATH.read_text())
 except FileNotFoundError:
     CONFIG = {}
+except json.JSONDecodeError as e:
+    print(f"Warning: malformed {CONFIG_PATH}: {e}; ignoring (mirror disabled).")
+    CONFIG = {}
 
 # Optional "base_dir" config overrides the default ~. Lets a service account
-# (e.g. radmin) write archives to a system-wide root like /home or /srv/dicom.
+# (e.g. mradmin) write archives to a system-wide root like /home or /srv/dicom.
+# A missing or non-directory value falls back to home rather than auto-creating
+# system paths from a typo'd config.
 BASE_DIR = Path(CONFIG.get("base_dir") or str(Path.home()))
+if not BASE_DIR.is_dir():
+    print(f"Warning: base_dir {BASE_DIR} is not a directory; falling back to home.")
+    BASE_DIR = Path.home()
 GUEST_DIR = BASE_DIR / "guest"
 
-# Characters forbidden on Windows + Unix filesystems, the DICOM PN delimiter
-# '^', and control bytes. Non-ASCII (CJK, accented Latin, etc.) is deliberately
-# preserved — NTFS, APFS, ext4 and our toolchain (tar, scp, Python) handle
-# UTF-8 natively, and stripping it would mangle real patient names.
-_FORBIDDEN_RE = re.compile(r'[<>:"/\\|?*$;\^\x00-\x1f]')
-_WHITESPACE_RE = re.compile(r'\s+')
-_UNDERSCORE_RUN_RE = re.compile(r'_+')
-
+# Non-ASCII (CJK, accented Latin, etc.) is deliberately preserved — NTFS,
+# APFS, ext4 and our toolchain (tar, scp, Python) handle UTF-8 natively,
+# and stripping it would mangle real patient names.
 def sanitize(text):
-    """Make text safe as a filename across Windows + Unix.
-
-    Whitespace runs become a single underscore; forbidden characters
-    (`<>:"/\\|?*$;`, DICOM `^`, and control bytes) are replaced with
-    underscores; adjacent underscores collapse; leading/trailing dots,
-    spaces and underscores are stripped (Windows drops trailing dots/spaces).
-    """
-    s = _WHITESPACE_RE.sub('_', str(text))
-    s = _FORBIDDEN_RE.sub('_', s)
-    s = _UNDERSCORE_RUN_RE.sub('_', s)
+    """Make text safe as a filename across Windows + Unix."""
+    s = re.sub(r'\s+', '_', str(text))
+    s = re.sub(r'[<>:"/\\|?*$;\^\x00-\x1f]', '_', s)
+    s = re.sub(r'_+', '_', s)
     return s.strip('._ ')
 
 def get_unique_path(target_path):
@@ -166,9 +164,9 @@ def process_study(study_dir):
     try:
         ds = pydicom.dcmread(str(dicom_files[0]))
         patient_id = sanitize(getattr(ds, 'PatientID', 'guest'))
-        # Path-traversal guard: sanitize() leaves '.' alone, so '..', leading
-        # dots/dashes, or any embedded '..' could escape ~ locally and the
-        # probed home root remotely. Fall back to guest like other invalid IDs.
+        # Path-traversal defense in depth: sanitize() already strips leading
+        # dots and forbidden chars, but mid-string '..' (e.g. 'foo..bar') and
+        # leading '-' survive. Reject those and fall back to guest.
         if not patient_id or patient_id.startswith((".", "-")) or ".." in patient_id:
             patient_id = "guest"
         patient_name = sanitize(getattr(ds, 'PatientName', 'unknown'))
