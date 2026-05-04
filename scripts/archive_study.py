@@ -28,13 +28,26 @@ except FileNotFoundError:
 BASE_DIR = Path(CONFIG.get("base_dir") or str(Path.home()))
 GUEST_DIR = BASE_DIR / "guest"
 
+# Characters forbidden on Windows + Unix filesystems, the DICOM PN delimiter
+# '^', and control bytes. Non-ASCII (CJK, accented Latin, etc.) is deliberately
+# preserved — NTFS, APFS, ext4 and our toolchain (tar, scp, Python) handle
+# UTF-8 natively, and stripping it would mangle real patient names.
+_FORBIDDEN_RE = re.compile(r'[<>:"/\\|?*$;\^\x00-\x1f]')
+_WHITESPACE_RE = re.compile(r'\s+')
+_UNDERSCORE_RUN_RE = re.compile(r'_+')
+
 def sanitize(text):
-    """Replaces illegal filesystem characters with underscores."""
-    # This pattern matches < > : " / \ | ? * $ ; and any non-printable chars
-    illegal_chars = r'[<>:"/\\|?*$;\x00-\x1f]'
-    # We also include the DICOM caret '^' since you're already replacing that
-    clean_text = re.sub(illegal_chars + r'|\^', '_', str(text))
-    return clean_text.strip()
+    """Make text safe as a filename across Windows + Unix.
+
+    Whitespace runs become a single underscore; forbidden characters
+    (`<>:"/\\|?*$;`, DICOM `^`, and control bytes) are replaced with
+    underscores; adjacent underscores collapse; leading/trailing dots,
+    spaces and underscores are stripped (Windows drops trailing dots/spaces).
+    """
+    s = _WHITESPACE_RE.sub('_', str(text))
+    s = _FORBIDDEN_RE.sub('_', s)
+    s = _UNDERSCORE_RUN_RE.sub('_', s)
+    return s.strip('._ ')
 
 def get_unique_path(target_path):
     """Appends a, b, c suffix if file exists."""
