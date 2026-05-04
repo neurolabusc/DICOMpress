@@ -1,4 +1,9 @@
 #!/bin/bash
+# Prefix every line of stdout/stderr with an ISO-8601 timestamp. storescp's
+# --verbose output and archive_study.py's prints both flow through this
+# filter, so the cron-launched log file gets timestamps without needing a
+# log4cplus config. fflush keeps writes line-buffered.
+exec > >(awk '{ print strftime("%Y-%m-%dT%H:%M:%S"), $0; fflush(); }') 2>&1
 set -x  # This will show us exactly where the script stops!
 
 # Use absolute paths for everything
