@@ -47,11 +47,15 @@ GUEST_DIR = BASE_DIR / "guest"
 # Non-ASCII (CJK, accented Latin, etc.) is deliberately preserved — NTFS,
 # APFS, ext4 and our toolchain (tar, scp, Python) handle UTF-8 natively,
 # and stripping it would mangle real patient names.
+#
+# '-' is the within-item delimiter; '_' is reserved as the between-item
+# separator in archive filenames, so literal '_' in input is also remapped
+# to '-' to keep filename structure unambiguous.
 def sanitize(text):
     """Make text safe as a filename across Windows + Unix."""
-    s = re.sub(r'\s+', '_', str(text))
-    s = re.sub(r'[<>:"/\\|?*$;\^\x00-\x1f]', '_', s)
-    s = re.sub(r'_+', '_', s)
+    s = re.sub(r'\s+', '-', str(text))
+    s = re.sub(r'[<>:"/\\|?*$;\^\x00-\x1f_]', '-', s)
+    s = re.sub(r'-+', '-', s)
     return s.strip('._ ')
 
 def get_unique_path(target_path):
@@ -198,10 +202,11 @@ def process_study(study_dir):
         dest_folder = GUEST_DIR
     dest_folder.mkdir(parents=True, exist_ok=True)
 
-    # Prepare archive name: YYYYMMDD_hhmmss_name[_step][_id].tar.zst.
-    # PerformedProcedureStepDescription and PatientID are each appended
-    # only when present (and, for PatientID, valid — see id_for_filename).
-    archive_name = f"{study_date}_{study_time}_{patient_name}"
+    # Prepare archive name: YYYYMMDD-hhmmss_name[_step][_id].tar.zst.
+    # Items are joined by '_'; within-item compounds (date-time, sanitized
+    # whitespace, etc.) use '-'. step and id are each appended only when
+    # present (and, for id, valid — see id_for_filename).
+    archive_name = f"{study_date}-{study_time}_{patient_name}"
     if step:
         archive_name += f"_{step}"
     if id_for_filename:
