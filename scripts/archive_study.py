@@ -170,12 +170,18 @@ def process_study(study_dir):
     # Read first file for metadata
     try:
         ds = pydicom.dcmread(str(dicom_files[0]))
-        patient_id = sanitize(getattr(ds, 'PatientID', 'guest'))
+        patient_id = sanitize(getattr(ds, 'PatientID', ''))
+        # patient_id is also appended to the archive filename below; we
+        # capture it here before the path-traversal guard so an invalid or
+        # missing input leaves id_for_filename empty (omitted from the name)
+        # rather than baking "guest" or leading-dash junk into it.
+        id_for_filename = patient_id
         # Path-traversal defense in depth: sanitize() already strips leading
         # dots and forbidden chars, but mid-string '..' (e.g. 'foo..bar') and
         # leading '-' survive. Reject those and fall back to guest.
         if not patient_id or patient_id.startswith((".", "-")) or ".." in patient_id:
             patient_id = "guest"
+            id_for_filename = ""
         patient_name = sanitize(getattr(ds, 'PatientName', 'unknown'))
         step = sanitize(getattr(ds, 'PerformedProcedureStepDescription', ''))
         # Strip non-digits — DICOM rarely has them, but a stray '/' would
@@ -192,11 +198,14 @@ def process_study(study_dir):
         dest_folder = GUEST_DIR
     dest_folder.mkdir(parents=True, exist_ok=True)
 
-    # Prepare archive name: YYYYMMDD_hhmmss_name[_step].tar.zst.
-    # PerformedProcedureStepDescription is appended only when present.
+    # Prepare archive name: YYYYMMDD_hhmmss_name[_step][_id].tar.zst.
+    # PerformedProcedureStepDescription and PatientID are each appended
+    # only when present (and, for PatientID, valid — see id_for_filename).
     archive_name = f"{study_date}_{study_time}_{patient_name}"
     if step:
         archive_name += f"_{step}"
+    if id_for_filename:
+        archive_name += f"_{id_for_filename}"
     archive_name += ".tar.zst"
     final_path = get_unique_path(dest_folder / archive_name)
 
