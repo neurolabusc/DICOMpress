@@ -39,6 +39,11 @@ module-level code (config load, BASE_DIR resolution) runs every time.
 - **Non-ASCII preservation** in `sanitize()` is intentional. CJK and accented
   patient names round-trip through tar/scp/ext4/APFS/NTFS fine. Don't "fix"
   it to ASCII-only.
+- **Two-tier filename delimiters**: archive filenames join items with `_`
+  and use `-` for within-item joins (date/time, sanitized whitespace).
+  `sanitize()` therefore actively maps literal `_` in DICOM tag values to
+  `-`. A future "consistency" change that lets `_` survive sanitize will
+  silently break filename parsing on `_` boundaries.
 - **`StrictHostKeyChecking=accept-new`** in SSH options pins the host key on
   first contact — fine for cron-launched receivers as long as the user-side
   pubkey-install step is done interactively first.
@@ -55,6 +60,10 @@ module-level code (config load, BASE_DIR resolution) runs every time.
 - The script is run via `--exec-on-eostudy` as a fresh process per study,
   so changes to `config.json` take effect on the next study. No restart
   of `storescp` needed.
+- Old archives (pre-flatten) have an `st_<timestamp>/` wrapper directory
+  inside the tar; new ones extract files at the archive root. The change
+  was deliberate — don't reintroduce the wrapper. Both layouts coexist
+  on disk for sites that have been running across the change.
 
 ## Things to do (if asked) and not to do
 

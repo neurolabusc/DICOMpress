@@ -160,7 +160,35 @@ ran `mkdir ~/crlab` first, the archive lands in `~/guest/`:
 ```bash
 ls -lh ~/guest/                # default landing zone for the bundled demo
 ls -lh ~/crlab/                # only if you mkdir'd it first
+# expect: 20140310-133834_stc-test_Research-MCBI-TESTING_crlab.tar.zst
+# (date and time come from the DICOM tags, not the wall clock)
 ```
+
+
+## Archive filename format
+
+Each archive is named:
+
+```
+YYYYMMDD-hhmmss_<PatientName>[_<Step>][_<PatientID>].tar.zst
+```
+
+| Segment | DICOM tag | Notes |
+|---|---|---|
+| `YYYYMMDD-hhmmss` | `StudyDate` (0008,0020) + `StudyTime` (0008,0030) | joined by `-` |
+| `<PatientName>` | `PatientName` (0010,0010) | defaults to `unknown` if missing |
+| `<Step>` | `PerformedProcedureStepDescription` (0040,0254) | omitted when absent |
+| `<PatientID>` | `PatientID` (0010,0020) | omitted when absent or path-traversal-rejected |
+
+**Two-tier delimiters.** Items are separated by `_`; within an item, `-` is
+the delimiter (so spaces and any literal `_` in DICOM tag values are
+remapped to `-`). This keeps the structure unambiguous to parse on `_`
+boundaries, even when patient names or step descriptions contain spaces.
+
+**Inside the archive.** Files are at the root of the tar — `tar -xf foo.tar.zst`
+extracts directly into the current directory. Earlier versions of the script
+wrapped contents in an `st_<timestamp>/` parent dir; archives written
+before that change still have the wrapper.
 
 
 ## Optional: preferred network transfer syntax
@@ -392,3 +420,4 @@ each lab user's Samba home.
 | `scp: Permission denied` to a user folder | Folder still owned by user with mode 755 | Run the `chgrp administrators` + `chmod 2775` commands on that folder |
 | Studies stop archiving and pile up in `/tmp/dicom_incoming/` | `config.json` is malformed; `archive_study.py` logs `Warning: malformed …` and continues without the mirror but you'll only see it in storescp's stderr | Validate: `python3 -m json.tool ~/.config/dicompress/config.json` |
 | `Warning: base_dir … is not a directory; falling back to home.` in storescp log | `"base_dir"` in config points at a missing path | Create it (`sudo mkdir -p <path>`) and ensure the running user can write to it; or remove the `base_dir` key |
+| `tar -xf foo.tar.zst` dumps files into the current directory instead of a subdir | Archives are now flat (no `st_<timestamp>/` wrapper) | Extract into a fresh dir: `mkdir study && tar -C study -xf foo.tar.zst`. Old archives written before the flatten still have a wrapper. |

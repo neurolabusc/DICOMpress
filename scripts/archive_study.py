@@ -56,6 +56,8 @@ def sanitize(text):
     s = re.sub(r'\s+', '-', str(text))
     s = re.sub(r'[<>:"/\\|?*$;\^\x00-\x1f_]', '-', s)
     s = re.sub(r'-+', '-', s)
+    # '-' is deliberately NOT in the strip set — leading '-' must survive so
+    # the path-traversal guard in process_study() can catch '-rf'-style IDs.
     return s.strip('._ ')
 
 def get_unique_path(target_path):
@@ -204,14 +206,15 @@ def process_study(study_dir):
 
     # Prepare archive name: YYYYMMDD-hhmmss_name[_step][_id].tar.zst.
     # Items are joined by '_'; within-item compounds (date-time, sanitized
-    # whitespace, etc.) use '-'. step and id are each appended only when
-    # present (and, for id, valid — see id_for_filename).
-    archive_name = f"{study_date}-{study_time}_{patient_name}"
-    if step:
-        archive_name += f"_{step}"
-    if id_for_filename:
-        archive_name += f"_{id_for_filename}"
-    archive_name += ".tar.zst"
+    # whitespace, etc.) use '-'. patient_name, step and id are each appended
+    # only when non-empty after sanitize (and, for id, valid — see
+    # id_for_filename), so an item that sanitises to '' doesn't leave a
+    # stray '__' in the filename.
+    parts = [f"{study_date}-{study_time}"]
+    for item in (patient_name, step, id_for_filename):
+        if item:
+            parts.append(item)
+    archive_name = "_".join(parts) + ".tar.zst"
     final_path = get_unique_path(dest_folder / archive_name)
 
     # Create Compressed Archive — add files at the archive root, not under
