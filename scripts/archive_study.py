@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import os
 import sys
 import json
 import shlex
@@ -178,6 +177,7 @@ def process_study(study_dir):
         if not patient_id or patient_id.startswith((".", "-")) or ".." in patient_id:
             patient_id = "guest"
         patient_name = sanitize(getattr(ds, 'PatientName', 'unknown'))
+        step = sanitize(getattr(ds, 'PerformedProcedureStepDescription', ''))
         # Strip non-digits — DICOM rarely has them, but a stray '/' would
         # turn the archive_name into an unintended subdirectory.
         study_date = re.sub(r'[^0-9]', '', str(getattr(ds, 'StudyDate', '00000000')))
@@ -192,17 +192,24 @@ def process_study(study_dir):
         dest_folder = GUEST_DIR
     dest_folder.mkdir(parents=True, exist_ok=True)
 
-    # Prepare archive name: YYYYMMDD_hhmmss_name.tar.zst
-    archive_name = f"{study_date}_{study_time}_{patient_name}.tar.zst"
+    # Prepare archive name: YYYYMMDD_hhmmss_name[_step].tar.zst.
+    # PerformedProcedureStepDescription is appended only when present.
+    archive_name = f"{study_date}_{study_time}_{patient_name}"
+    if step:
+        archive_name += f"_{step}"
+    archive_name += ".tar.zst"
     final_path = get_unique_path(dest_folder / archive_name)
 
-    # Create Compressed Archive
+    # Create Compressed Archive — add files at the archive root, not under
+    # the storescp st_<timestamp>/ parent dir. tarfile.add recurses into
+    # subdirs and preserves their names (in case storescp ever produces them).
     print(f"Archiving {study_path} to {final_path}...")
     with open(final_path, 'wb') as f:
         cctx = zstd.ZstdCompressor(level=3)
         with cctx.stream_writer(f) as compressor:
             with tarfile.open(fileobj=compressor, mode='w|') as tar:
-                tar.add(study_path, arcname=os.path.basename(study_path))
+                for child in sorted(study_path.iterdir()):
+                    tar.add(child, arcname=child.name)
 
     # Optionally mirror to remote SSH server
     mirror_to_ssh(final_path, patient_id)
