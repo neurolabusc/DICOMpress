@@ -15,11 +15,15 @@ STORES_BIN="/opt/homebrew/bin/storescp"
 # PYTHON_BIN=""
 PYTHON_BIN="/Users/chris/.pyenv/versions/3.13.2/bin/python3"
 
-# Preferred network transfer syntax — leave empty for storescp's default
-# (uncompressed). See https://support.dcmtk.org/docs/storescp.html for the
-# full list (e.g. --prefer-little, --prefer-big, --prefer-jpeg8,
-# --prefer-j2k-lossless, --prefer-rle, --accept-all).
-PREFER_TS="--prefer-lossless"
+# Negotiation flags. --promiscuous accepts unknown SOP classes (so the scanner
+# isn't artificially limited); --prefer-lossless steers transfer-syntax
+# negotiation toward JPEG Lossless when offered. The SCU still chooses which
+# accepted context to USE per Store Request, so on-wire compression only
+# kicks in if the scanner is configured to send a compressed transfer syntax
+# (typically a per-destination "Compression / Transfer Syntax" option that
+# only affects new acquisitions on Siemens systems). See
+# https://support.dcmtk.org/docs/storescp.html for the full flag list.
+PREFER_TS="--promiscuous --prefer-lossless"
 
 mkdir -p "$INCOMING"
 
