@@ -167,6 +167,53 @@ def mirror_to_ssh(local_path, patient_id):
     print(f"Mirrored to {ssh_cfg['user']}@{ssh_cfg['host']}:{remote_target}")
 
 
+def mirror_to_smb(local_path, patient_id):
+    """Optionally mirror the archive to an SMB share mounted locally.
+
+    The mount itself is expected to be managed outside this script (typically
+    /etc/fstab with `_netdev,nofail`). If the mount is missing — share offline,
+    firewall blocking, network down — we log and skip. The local archive is
+    unaffected; a later study will pick up the mount once it returns.
+    """
+    smb_cfg = CONFIG.get("smb") or {}
+    mount_point = smb_cfg.get("mount_point")
+    if not mount_point:
+        return
+
+    mp = Path(mount_point)
+    if not mp.is_mount():
+        print(f"SMB mirror: {mount_point} is not mounted; skipping.")
+        return
+
+    # Same patient-folder-or-guest semantics as the local + SSH mirror paths.
+    dest = mp / patient_id
+    is_guest = False
+    if not dest.is_dir():
+        dest = mp / "guest"
+        is_guest = True
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f"SMB mirror: could not create {dest}: {e}")
+            return
+
+    target = dest / local_path.name
+    try:
+        shutil.copy(local_path, target)
+    except OSError as e:
+        print(f"SMB mirror: copy failed: {e}")
+        return
+
+    # Best-effort chmod for parity with the SSH mirror. cifs may not honour
+    # POSIX chmod (server-side ACLs win) — silently fine if it doesn't stick.
+    try:
+        target.chmod(0o666 if is_guest else 0o664)
+    except OSError:
+        pass
+
+    print(f"Mirrored to SMB: {target}")
+
+
 def process_study(study_dir):
     study_path = Path(study_dir)
     dicom_files = list(study_path.glob("*"))
@@ -228,8 +275,11 @@ def process_study(study_dir):
                 for child in sorted(study_path.iterdir()):
                     tar.add(child, arcname=child.name)
 
-    # Optionally mirror to remote SSH server
+    # Optional mirrors — each is independently configured in config.json and
+    # is a no-op when its block is absent or its destination is unreachable.
+    # Both can run for the same study if both are configured.
     mirror_to_ssh(final_path, patient_id)
+    mirror_to_smb(final_path, patient_id)
 
     # Cleanup: Delete original DICOMs
     shutil.rmtree(study_path)

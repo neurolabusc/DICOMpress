@@ -1,7 +1,11 @@
 {
+  "base_dir": "/home",
   "ssh": {
     "host": "192.0.2.0",
     "port": 22,
     "user": "mradmin"
+  },
+  "smb": {
+    "mount_point": "/mnt/dicom-mirror"
   }
 }

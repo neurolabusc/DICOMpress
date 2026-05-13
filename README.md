@@ -240,7 +240,8 @@ The script does **not** create the root, only the `guest` fallback inside it.
 For the running user to write into pre-existing user folders like `/home/crlab/`,
 the same setgid trick used for the SSH mirror works locally: `sudo chgrp <admin-group> /home/crlab && sudo chmod 2775 /home/crlab`.
 
-This setting and the `ssh` block below can coexist in the same config file.
+This setting and the `ssh` / `smb` mirror blocks below can all coexist in the
+same config file; each block is independently optional.
 
 
 ## Optional: mirror archives to a remote SSH server
@@ -341,6 +342,105 @@ sudo chmod 2777 ~guest
 ```
 
 
+## Optional: mirror archives to an SMB share
+
+An alternative to the SSH mirror above: copy each archive to an SMB / CIFS
+share mounted on the receiver. Useful when the mirror target is a Mac /
+Windows / domain-managed file server rather than a Linux/NAS box you can SSH
+into. **This is the newer of the two mirror options and is currently
+experimental** — the SSH mirror above is the proven path for NAS targets.
+
+Both blocks can coexist; both mirrors run for each study if both are
+configured. Either one missing is a silent no-op.
+
+The receiver-side mount is managed outside this script (in `/etc/fstab` or
+a systemd `.mount` unit), so an unreachable share — network down,
+firewall, server offline — never blocks local archiving. The script
+just probes whether the mount-point is a live mount before each write
+and skips with a log line if it isn't.
+
+### Step 1 — Install `cifs-utils` (one time)
+
+```bash
+sudo apt install cifs-utils
+```
+
+### Step 2 — Store credentials in a root-only file
+
+```bash
+sudo tee /etc/cifs-creds-dicompress >/dev/null <<'EOF'
+username=YOUR_AD_USERNAME
+password=YOUR_AD_PASSWORD
+domain=YOUR_DOMAIN
+EOF
+sudo chmod 600 /etc/cifs-creds-dicompress
+sudo chown root:root /etc/cifs-creds-dicompress
+```
+
+`mode 600` keeps the password readable only by `root` — the same trust
+model as your SSH private key. The file isn't encrypted, but no
+non-root user on the box can read it.
+
+### Step 3 — Add an `/etc/fstab` line
+
+```
+//FILESERVER.EXAMPLE.COM/sharename /mnt/dicom-mirror cifs \
+    credentials=/etc/cifs-creds-dicompress,uid=<svc-user>,gid=<svc-group>,\
+    file_mode=0664,dir_mode=2775,_netdev,nofail,x-systemd.automount,\
+    x-systemd.mount-timeout=15s 0 0
+```
+
+Key options, in plain language:
+- `credentials=…` — points to the file in Step 2.
+- `uid=<svc-user>,gid=<svc-group>` — make files appear owned by the
+  receiver's service account (`mradmin` in our examples) so the running
+  script can read/write the mount-point.
+- `file_mode=0664,dir_mode=2775` — POSIX appearance from the Linux side
+  (server-side ACLs still rule on the wire).
+- `_netdev,nofail` — wait for the network; **never block boot** if the
+  share is unreachable.
+- `x-systemd.automount,x-systemd.mount-timeout=15s` — let systemd mount
+  on-demand the first time something touches the mount-point, retry if
+  network blips, and time out after 15s rather than hanging the writer.
+
+```bash
+sudo mkdir -p /mnt/dicom-mirror
+sudo systemctl daemon-reload
+sudo mount /mnt/dicom-mirror
+mount | grep dicom-mirror   # confirm it mounted
+```
+
+### Step 4 — Add the `smb` block to `~/.config/dicompress/config.json`
+
+```json
+{
+  "smb": {
+    "mount_point": "/mnt/dicom-mirror"
+  }
+}
+```
+
+### How destination resolution works
+
+Same fallback semantics as the SSH mirror:
+
+- For `PatientID = jflab`, the script writes to `<mount_point>/jflab/` if
+  that folder exists; otherwise it writes to `<mount_point>/guest/`
+  (auto-created on first use).
+- Permissions inside: best-effort `chmod 0664` for user folders, `0666` for
+  guest. `cifs` may ignore POSIX chmod in favour of server-side ACLs —
+  that's expected; share-level access control on the server is what
+  actually governs who can see what.
+
+> **Caveat about per-user ownership.** Files written through an SMB mount
+> always appear owned by the mount user (the `uid=…` you set in fstab) —
+> you cannot make `<mount>/jflab/foo.tar.zst` appear owned by jflab when
+> the writer is mradmin. If you need true per-lab ownership, manage access
+> with **server-side share or NTFS ACLs** rather than POSIX. Symlink-to-guest
+> tricks work over SSH/NFS but are inconsistent across SMB clients
+> (Windows in particular).
+
+
 ## Project layout
 
 ```
@@ -421,3 +521,5 @@ each lab user's Samba home.
 | Studies stop archiving and pile up in `/tmp/dicom_incoming/` | `config.json` is malformed; `archive_study.py` logs `Warning: malformed …` and continues without the mirror but you'll only see it in storescp's stderr | Validate: `python3 -m json.tool ~/.config/dicompress/config.json` |
 | `Warning: base_dir … is not a directory; falling back to home.` in storescp log | `"base_dir"` in config points at a missing path | Create it (`sudo mkdir -p <path>`) and ensure the running user can write to it; or remove the `base_dir` key |
 | `tar -xf foo.tar.zst` dumps files into the current directory instead of a subdir | Archives are now flat (no `st_<timestamp>/` wrapper) | Extract into a fresh dir: `mkdir study && tar -C study -xf foo.tar.zst`. Old archives written before the flatten still have a wrapper. |
+| `SMB mirror: /mnt/dicom-mirror is not mounted; skipping.` | Share offline, network/firewall, or `_netdev,nofail` triggered at boot | Check `mount \| grep dicom-mirror`; try `sudo mount /mnt/dicom-mirror`; verify the share is reachable: `smbclient -L //FILESERVER -A /etc/cifs-creds-dicompress` |
+| `SMB mirror: copy failed: [Errno 13] Permission denied` | Mount-point ownership mismatch (script runs as `mradmin`, mount has `uid=root`) | Fix the `uid=…` / `gid=…` options in the `/etc/fstab` line and `sudo mount -o remount /mnt/dicom-mirror` |

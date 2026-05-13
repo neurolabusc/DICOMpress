@@ -19,10 +19,20 @@ module-level code (config load, BASE_DIR resolution) runs every time.
 - **LOCAL**: archive lands in `BASE_DIR / <PatientID>/` only if that directory
   *already exists*. Otherwise `BASE_DIR / guest/` (auto-created if missing).
   `BASE_DIR` is `~` unless `config.json` overrides via `"base_dir"`.
-- **REMOTE**: probes `REMOTE_HOME_ROOTS` (`/volume1/home`, `/home`, `/Users`)
-  for `<root>/<PatientID>`, falls back to `<root>/guest`. Deliberately does
-  NOT use `getent passwd` — Synology and ASUSTOR return `/nonexistent` for
-  the system `guest` user, which is *not* the same path as `/volume1/home/guest`.
+- **REMOTE (SSH mirror)**: probes `REMOTE_HOME_ROOTS` (`/volume1/home`,
+  `/home`, `/Users`) for `<root>/<PatientID>`, falls back to `<root>/guest`.
+  Deliberately does NOT use `getent passwd` — Synology and ASUSTOR return
+  `/nonexistent` for the system `guest` user, which is *not* the same path
+  as `/volume1/home/guest`.
+- **REMOTE (SMB mirror)**: writes under `<mount_point>/<PatientID>/` if that
+  folder exists, else `<mount_point>/guest/` (auto-created). The mount
+  itself is managed outside the script (fstab `_netdev,nofail` +
+  `x-systemd.automount`), so the script no-ops when the share is offline
+  rather than blocking local archiving.
+
+The two mirror modes (`ssh` and `smb`) are independently configurable; each
+runs only if its block is present in `config.json`, and they can run for
+the same study.
 
 ## Policies — don't accidentally weaken these
 
@@ -47,6 +57,12 @@ module-level code (config load, BASE_DIR resolution) runs every time.
 - **`StrictHostKeyChecking=accept-new`** in SSH options pins the host key on
   first contact — fine for cron-launched receivers as long as the user-side
   pubkey-install step is done interactively first.
+- **SMB ownership model**: every file the receiver writes through an SMB
+  mount appears owned by the mount user (the `uid=…` in fstab). You cannot
+  give per-patient POSIX ownership through a single mount — it's a property
+  of the SMB protocol, not a bug. Per-user access is enforced via server-side
+  share/NTFS ACLs, not POSIX. Don't reintroduce a symlink-to-guest scheme:
+  SMB clients (Windows in particular) handle symlinks inconsistently.
 
 ## Common gotchas
 
