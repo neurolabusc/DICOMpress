@@ -344,115 +344,37 @@ sudo chmod 2777 ~guest
 
 ## Optional: mirror archives to an SMB share
 
-An alternative to the SSH mirror above: copy each archive to an SMB / CIFS
-share mounted on the receiver. Useful when the mirror target is a Mac /
-Windows / domain-managed file server rather than a Linux/NAS box you can SSH
-into. **This is the newer of the two mirror options and is currently
-experimental** — the SSH mirror above is the proven path for NAS targets.
+An alternative (or addition) to the SSH mirror above: copy each archive
+to an SMB / CIFS share mounted on the receiver. Useful when the target
+is a Mac / Windows / domain-managed file server rather than a NAS you
+can SSH into. Each block in the config file is independently optional;
+either one or both can run for the same study.
 
-Both blocks can coexist; both mirrors run for each study if both are
-configured. Either one missing is a silent no-op.
+Briefly, the recipe is:
 
-The receiver-side mount is managed outside this script (in `/etc/fstab` or
-a systemd `.mount` unit), so an unreachable share — network down,
-firewall, server offline — never blocks local archiving. The script
-just probes whether the mount-point is a live mount before each write
-and skips with a log line if it isn't.
+1. `sudo apt install cifs-utils`
+2. Write `/etc/cifs-creds-dicompress` (mode 600) with `username=…`, `password=…`, `domain=…`.
+3. Add an `/etc/fstab` line with `_netdev,nofail,x-systemd.automount` so the receiver boots cleanly even if the share is unreachable.
+4. Add `"smb": {"mount_point": "/mnt/dicom-mirror"}` to `~/.config/dicompress/config.json`.
 
-### Step 1 — Install `cifs-utils` (one time)
+**Full setup walk-through, including the gotchas that bit us in real-world
+deployment** — credentials format, the `dir_mode=02775` trap, reboot
+semantics, troubleshooting — is in [SMB.md](SMB.md).
 
-```bash
-sudo apt install cifs-utils
-```
+Folder semantics worth knowing without opening that file:
 
-### Step 2 — Store credentials in a root-only file
-
-```bash
-sudo tee /etc/cifs-creds-dicompress >/dev/null <<'EOF'
-username=YOUR_AD_USERNAME
-password=YOUR_AD_PASSWORD
-domain=YOUR_DOMAIN
-EOF
-sudo chmod 600 /etc/cifs-creds-dicompress
-sudo chown root:root /etc/cifs-creds-dicompress
-```
-
-`mode 600` keeps the password readable only by `root` — the same trust
-model as your SSH private key. The file isn't encrypted, but no
-non-root user on the box can read it.
-
-### Step 3 — Add an `/etc/fstab` line
-
-```
-//FILESERVER.EXAMPLE.COM/sharename /mnt/dicom-mirror cifs \
-    credentials=/etc/cifs-creds-dicompress,uid=<svc-user>,gid=<svc-group>,\
-    file_mode=0664,dir_mode=02775,_netdev,nofail,x-systemd.automount,\
-    x-systemd.mount-timeout=15s 0 0
-```
-
-Key options, in plain language:
-- `credentials=…` — points to the file in Step 2.
-- `uid=<svc-user>,gid=<svc-group>` — make files appear owned by the
-  receiver's service account (`mradmin` in our examples) so the running
-  script can read/write the mount-point.
-- `file_mode=0664,dir_mode=02775` — POSIX appearance from the Linux side
-  (server-side ACLs still rule on the wire). **Both values must have a
-  leading zero**: `mount.cifs` warns "not expressed in octal" and silently
-  parses bare `2775` as decimal, producing the nonsense permission mask
-  `05327` (`--wx-w-rwx`, owner has no read — `ls` returns "Permission
-  denied" on a mounted directory).
-- `_netdev,nofail` — wait for the network; **never block boot** if the
-  share is unreachable.
-- `x-systemd.automount,x-systemd.mount-timeout=15s` — let systemd mount
-  on-demand the first time something touches the mount-point, retry if
-  network blips, and time out after 15s rather than hanging the writer.
-
-```bash
-sudo mkdir -p /mnt/dicom-mirror
-sudo systemctl daemon-reload
-sudo mount /mnt/dicom-mirror
-mount | grep dicom-mirror   # confirm it mounted
-```
-
-### Step 4 — Add the `smb` block to `~/.config/dicompress/config.json`
-
-```json
-{
-  "smb": {
-    "mount_point": "/mnt/dicom-mirror"
-  }
-}
-```
-
-### How destination resolution works
-
-The SMB mirror **auto-creates a folder per PatientID** — different from the
-local and SSH paths, which require admin-managed folders and otherwise
-fall through to `guest/`.
-
-- For `PatientID = jflab`, the script writes to `<mount_point>/jflab/`,
-  creating the folder on first use. New labs land in their own folder
-  automatically.
-- Permissions inside: best-effort `chmod 0664` for user folders, `0666` for
-  guest (the literal `PatientID == "guest"` case). `cifs` may ignore POSIX
-  chmod in favour of server-side ACLs — that's expected; share-level
-  access control on the server is what actually governs who can see what.
-- New directories inherit the `dir_mode` set at mount time (`02775` with
-  setgid), so files written into them get the right group automatically.
-
-The local and SSH mirror paths keep their original behaviour (patient
-folder must already exist; otherwise the archive lands in guest). The
-asymmetry is deliberate: SMB shares tend to be collaboration surfaces
-where it's safer to provision-on-demand; local + SSH targets are typically
-per-user home directories where the admin should curate the folder set.
-
-> **Caveat about per-user ownership.** Files written through an SMB mount
-> always appear owned by the mount user (the `uid=…` you set in fstab) —
-> you cannot make `<mount>/jflab/foo.tar.zst` appear owned by jflab when
-> the writer is mradmin. If you need true per-lab ownership, manage access
-> with **server-side share or NTFS ACLs** rather than POSIX. Symlink-to-guest
-> tricks work over SSH/NFS but are inconsistent across SMB clients
-> (Windows in particular).
+- The SMB mirror **auto-creates a folder per PatientID** (e.g.
+  `<mount_point>/crlab/` on first study from PatientID=crlab). This is
+  different from the local and SSH paths, which require admin-managed
+  folders and otherwise fall through to `guest/`. The asymmetry is
+  deliberate — SMB shares are typically collaboration surfaces where
+  provision-on-demand is friendlier.
+- Files inside appear owned by the mount user (the `uid=…` in fstab).
+  Per-user POSIX ownership cannot be achieved through a single mount —
+  use server-side share / NTFS ACLs for that, not POSIX.
+- If the mount is unreachable when a study completes, the script logs
+  `SMB mirror: /mnt/dicom-mirror is not mounted; skipping` and the
+  rest of the pipeline (local archive, SSH mirror if any) is unaffected.
 
 
 ## Project layout
@@ -461,6 +383,7 @@ per-user home directories where the admin should curate the folder set.
 .
 ├── README.md
 ├── CLAUDE.md                    # notes for AI assistants working on the repo
+├── SMB.md                       # deep dive on the optional SMB mirror destination
 ├── LICENSE
 ├── .gitignore                   # ignores venv/, *.bak, .DS_Store
 ├── schematic.png                # diagram embedded at the top of the README

@@ -102,3 +102,7 @@ the same study.
 - `scripts/config.example.json` — template for `~/.config/dicompress/config.json`.
 - `DICOMs/MR.dcm` — single demo DICOM (PatientID=crlab) for the README's
   Testing section.
+- `SMB.md` — deep dive on the optional SMB mirror destination (setup,
+  reboot semantics, the real-world traps we hit during deployment).
+  README has a brief summary; SMB.md is the reference.
+- `docs/asustor-mirror.md` — same role for the SSH-mirror-to-ASUSTOR path.
