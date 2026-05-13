@@ -24,11 +24,14 @@ module-level code (config load, BASE_DIR resolution) runs every time.
   Deliberately does NOT use `getent passwd` — Synology and ASUSTOR return
   `/nonexistent` for the system `guest` user, which is *not* the same path
   as `/volume1/home/guest`.
-- **REMOTE (SMB mirror)**: writes under `<mount_point>/<PatientID>/` if that
-  folder exists, else `<mount_point>/guest/` (auto-created). The mount
-  itself is managed outside the script (fstab `_netdev,nofail` +
-  `x-systemd.automount`), so the script no-ops when the share is offline
-  rather than blocking local archiving.
+- **REMOTE (SMB mirror)**: writes under `<mount_point>/<PatientID>/`,
+  **auto-creating the folder if missing** (unlike local + SSH, which fall
+  back to guest). This asymmetry is intentional: SMB shares are typically
+  collaboration surfaces where provisioning-on-demand is friendlier; local
+  and SSH paths target per-user homes where the admin should curate the
+  folder set. The mount itself is managed outside the script (fstab
+  `_netdev,nofail` + `x-systemd.automount`), so the script no-ops when the
+  share is offline rather than blocking local archiving.
 
 The two mirror modes (`ssh` and `smb`) are independently configurable; each
 runs only if its block is present in `config.json`, and they can run for

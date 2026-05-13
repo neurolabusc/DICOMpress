@@ -426,15 +426,25 @@ mount | grep dicom-mirror   # confirm it mounted
 
 ### How destination resolution works
 
-Same fallback semantics as the SSH mirror:
+The SMB mirror **auto-creates a folder per PatientID** — different from the
+local and SSH paths, which require admin-managed folders and otherwise
+fall through to `guest/`.
 
-- For `PatientID = jflab`, the script writes to `<mount_point>/jflab/` if
-  that folder exists; otherwise it writes to `<mount_point>/guest/`
-  (auto-created on first use).
+- For `PatientID = jflab`, the script writes to `<mount_point>/jflab/`,
+  creating the folder on first use. New labs land in their own folder
+  automatically.
 - Permissions inside: best-effort `chmod 0664` for user folders, `0666` for
-  guest. `cifs` may ignore POSIX chmod in favour of server-side ACLs —
-  that's expected; share-level access control on the server is what
-  actually governs who can see what.
+  guest (the literal `PatientID == "guest"` case). `cifs` may ignore POSIX
+  chmod in favour of server-side ACLs — that's expected; share-level
+  access control on the server is what actually governs who can see what.
+- New directories inherit the `dir_mode` set at mount time (`02775` with
+  setgid), so files written into them get the right group automatically.
+
+The local and SSH mirror paths keep their original behaviour (patient
+folder must already exist; otherwise the archive lands in guest). The
+asymmetry is deliberate: SMB shares tend to be collaboration surfaces
+where it's safer to provision-on-demand; local + SSH targets are typically
+per-user home directories where the admin should curate the folder set.
 
 > **Caveat about per-user ownership.** Files written through an SMB mount
 > always appear owned by the mount user (the `uid=…` you set in fstab) —

@@ -185,17 +185,19 @@ def mirror_to_smb(local_path, patient_id):
         print(f"SMB mirror: {mount_point} is not mounted; skipping.")
         return
 
-    # Same patient-folder-or-guest semantics as the local + SSH mirror paths.
+    # The SMB mirror auto-creates a folder for each PatientID — unlike the
+    # local and SSH mirror paths, where patient folders must already exist
+    # and unknown IDs fall through to guest. SMB is typically used as a
+    # collaboration surface (everyone-can-see-via-Samba) rather than a
+    # per-user home, so making the per-lab folder the first time we see the
+    # ID is the friendlier default.
     dest = mp / patient_id
-    is_guest = False
-    if not dest.is_dir():
-        dest = mp / "guest"
-        is_guest = True
-        try:
-            dest.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            print(f"SMB mirror: could not create {dest}: {e}")
-            return
+    is_guest = (patient_id == "guest")
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"SMB mirror: could not create {dest}: {e}")
+        return
 
     target = dest / local_path.name
     try:
