@@ -386,7 +386,7 @@ non-root user on the box can read it.
 ```
 //FILESERVER.EXAMPLE.COM/sharename /mnt/dicom-mirror cifs \
     credentials=/etc/cifs-creds-dicompress,uid=<svc-user>,gid=<svc-group>,\
-    file_mode=0664,dir_mode=2775,_netdev,nofail,x-systemd.automount,\
+    file_mode=0664,dir_mode=02775,_netdev,nofail,x-systemd.automount,\
     x-systemd.mount-timeout=15s 0 0
 ```
 
@@ -395,8 +395,12 @@ Key options, in plain language:
 - `uid=<svc-user>,gid=<svc-group>` — make files appear owned by the
   receiver's service account (`mradmin` in our examples) so the running
   script can read/write the mount-point.
-- `file_mode=0664,dir_mode=2775` — POSIX appearance from the Linux side
-  (server-side ACLs still rule on the wire).
+- `file_mode=0664,dir_mode=02775` — POSIX appearance from the Linux side
+  (server-side ACLs still rule on the wire). **Both values must have a
+  leading zero**: `mount.cifs` warns "not expressed in octal" and silently
+  parses bare `2775` as decimal, producing the nonsense permission mask
+  `05327` (`--wx-w-rwx`, owner has no read — `ls` returns "Permission
+  denied" on a mounted directory).
 - `_netdev,nofail` — wait for the network; **never block boot** if the
   share is unreachable.
 - `x-systemd.automount,x-systemd.mount-timeout=15s` — let systemd mount
@@ -523,3 +527,4 @@ each lab user's Samba home.
 | `tar -xf foo.tar.zst` dumps files into the current directory instead of a subdir | Archives are now flat (no `st_<timestamp>/` wrapper) | Extract into a fresh dir: `mkdir study && tar -C study -xf foo.tar.zst`. Old archives written before the flatten still have a wrapper. |
 | `SMB mirror: /mnt/dicom-mirror is not mounted; skipping.` | Share offline, network/firewall, or `_netdev,nofail` triggered at boot | Check `mount \| grep dicom-mirror`; try `sudo mount /mnt/dicom-mirror`; verify the share is reachable: `smbclient -L //FILESERVER -A /etc/cifs-creds-dicompress` |
 | `SMB mirror: copy failed: [Errno 13] Permission denied` | Mount-point ownership mismatch (script runs as `mradmin`, mount has `uid=root`) | Fix the `uid=…` / `gid=…` options in the `/etc/fstab` line and `sudo mount -o remount /mnt/dicom-mirror` |
+| `ls /mnt/dicom-mirror/` returns "Permission denied" even though the mount succeeded | `dir_mode` in fstab written without leading zero (e.g. `dir_mode=2775`); `mount.cifs` parses as decimal → octal `05327` → owner has no read | Change to `dir_mode=02775` in `/etc/fstab`, then `sudo umount /mnt/dicom-mirror && sudo systemctl daemon-reload && sudo mount /mnt/dicom-mirror` |
