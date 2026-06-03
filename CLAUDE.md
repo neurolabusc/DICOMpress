@@ -9,7 +9,9 @@ Two cooperating processes:
 2. On End-Of-Study (5s of silence), storescp invokes
    `archive_study.py <study-dir>` via `--exec-on-eostudy`. The Python side
    reads metadata from the first DICOM, tar+zstd-compresses the study,
-   deletes the temp dir, and optionally mirrors via `scp`.
+   deletes the temp dir, and optionally mirrors the archive to a remote
+   SSH/SCP target and/or a locally-mounted SMB share (each configured
+   independently in `config.json`).
 
 `archive_study.py` is invoked **once per study** as a fresh process, so
 module-level code (config load, BASE_DIR resolution) runs every time.

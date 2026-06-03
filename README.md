@@ -4,7 +4,7 @@ Automated DICOM reception with PatientID-based sorting and Zstd compression.
 Receives studies via `storescp`, then compresses them into `.tar.zst` archives
 organised by PatientID under your home directory.
 
-![Data flow: scanner → storescp → archive_study.py → local archive + optional SSH mirror](schematic.png)
+![Data flow: scanner → storescp → archive_study.py → local archive + optional SSH/SMB mirrors](schematic.png)
 
 ## Prerequisites
 
@@ -183,7 +183,7 @@ YYYYMMDD-hhmmss_<PatientName>[_<StudyDesc>][_<PatientID>].tar.zst
 **Two-tier delimiters.** Items are separated by `_`; within an item, `-` is
 the delimiter (so spaces and any literal `_` in DICOM tag values are
 remapped to `-`). This keeps the structure unambiguous to parse on `_`
-boundaries, even when patient names or step descriptions contain spaces.
+boundaries, even when patient names or study descriptions contain spaces.
 
 **Inside the archive.** Files are at the root of the tar — `tar -xf foo.tar.zst`
 extracts directly into the current directory. Earlier versions of the script
