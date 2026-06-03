@@ -363,15 +363,21 @@ semantics, troubleshooting — is in [SMB.md](SMB.md).
 
 Folder semantics worth knowing without opening that file:
 
-- The SMB mirror **auto-creates a folder per PatientID** (e.g.
-  `<mount_point>/crlab/` on first study from PatientID=crlab). This is
-  different from the local and SSH paths, which require admin-managed
-  folders and otherwise fall through to `guest/`. The asymmetry is
-  deliberate — SMB shares are typically collaboration surfaces where
-  provision-on-demand is friendlier.
+- The SMB mirror routes by **the first word of `PerformedProcedureStepDescription`**
+  (`(0040,0254)`), not by PatientID. If that word contains `lab`
+  (case-insensitive), the archive lands in `<mount>/<first_word>/`
+  (e.g. PPSD `SophieLab TMS` → `<mount>/SophieLab/…`). Otherwise it
+  falls back to `<mount>/guest/`. The folder is auto-created on first
+  use. The local archive and the SSH mirror (if configured) keep their
+  PatientID-based routing — this asymmetry is deliberate.
+- Files are written `0666` (RW for everyone). Per-lab visibility is
+  enforced by server-side share / NTFS ACLs on the SMB server, not via
+  POSIX file permissions — which is why everyone-writable is fine in
+  this model (users only see their own lab's folder via the share's
+  access control).
 - Files inside appear owned by the mount user (the `uid=…` in fstab).
   Per-user POSIX ownership cannot be achieved through a single mount —
-  use server-side share / NTFS ACLs for that, not POSIX.
+  again, use server-side ACLs for that.
 - If the mount is unreachable when a study completes, the script logs
   `SMB mirror: /mnt/dicom-mirror is not mounted; skipping` and the
   rest of the pipeline (local archive, SSH mirror if any) is unaffected.

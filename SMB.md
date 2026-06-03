@@ -36,30 +36,53 @@ per study if both are configured.
 
 ## How destination resolution works
 
-The SMB mirror auto-creates a folder per PatientID — this is **different**
-from the local archive and SSH mirror, which require admin-managed
-folders and otherwise fall through to `guest/`.
+The SMB mirror routes by **the first word of `PerformedProcedureStepDescription`
+(DICOM tag `(0040,0254)`)**, NOT by PatientID. This is intentional — SMB
+shares are typically lab-collaboration surfaces where server-side ACLs
+scope visibility per-lab-folder, so routing by lab name matches the
+access model better than routing by patient.
 
-| PatientID | Lands at | Folder created? | File mode |
-|---|---|---|---|
-| `crlab` (any valid ID) | `<mount_point>/crlab/<name>.tar.zst` | on first study | `0664` |
-| `jflab` (different ID) | `<mount_point>/jflab/<name>.tar.zst` | on first study | `0664` |
-| missing tag | `<mount_point>/guest/<name>.tar.zst` | on first study | `0666` |
-| path-traversal-rejected (`..`, leading `-`) | `<mount_point>/guest/<name>.tar.zst` | on first study | `0666` |
+Rule:
 
-**Why auto-create here?** SMB shares are typically collaboration surfaces
-where new labs should "just work" the first time they send a study. The
-local and SSH paths are typically per-user home directories where the
-admin should curate the folder set. The asymmetry is deliberate; don't
-"unify" it.
+> If the **first word** of `PerformedProcedureStepDescription` contains
+> the substring **"lab"** (case-insensitive), the archive lands in
+> `<mount_point>/<first_word>/`. Otherwise it lands in `<mount_point>/guest/`.
 
-**Permission caveats.** Files inside the share appear owned by the mount
-user (set via `uid=` in fstab — typically the receiver's service account
-like `radmin`). You **cannot** make `<mount>/jflab/foo.tar.zst` appear
-owned by jflab — that's a property of SMB, not a bug. Per-user access is
-enforced by **server-side share / NTFS ACLs**, not POSIX ownership. The
-`chmod 0664` (and `0666` for guest) the script applies is best-effort;
-cifs may ignore it in favour of server-side ACLs, which is fine.
+The folder is auto-created on first use, and files are written with
+mode `0666` (RW for everyone) — per-lab visibility is enforced at the
+share / NTFS-ACL level on the server, not via POSIX file permissions.
+
+`step` is already sanitised by the time `mirror_to_smb` sees it (spaces
+and forbidden characters replaced with `-`), so the script splits on
+`-` to recover the original first word.
+
+### Examples
+
+| `PerformedProcedureStepDescription` | sanitised `step` | first word | contains "lab"? | lands in |
+|---|---|---|---|---|
+| `SophieLab TMS` | `SophieLab-TMS` | `SophieLab` | ✓ | `<mount>/SophieLab/…` |
+| `BrainHealth AgingBrain` | `BrainHealth-AgingBrain` | `BrainHealth` | ✗ | `<mount>/guest/…` |
+| `Research MCBI TESTING` | `Research-MCBI-TESTING` | `Research` | ✗ | `<mount>/guest/…` |
+| `Lab` (alone) | `Lab` | `Lab` | ✓ | `<mount>/Lab/…` |
+| `Sophielab tms` (lowercase) | `Sophielab-tms` | `Sophielab` | ✓ | `<mount>/Sophielab/…` (case preserved) |
+| _(tag missing or empty)_ | `""` | `""` | ✗ | `<mount>/guest/…` |
+| `Test Lab Run` (lab not first) | `Test-Lab-Run` | `Test` | ✗ | `<mount>/guest/…` |
+
+Note: PatientID is **not** used for SMB routing. It still appears as the
+trailing component of the archive **filename** (e.g.
+`20260603-133744_RO_SophieLab-TMS_cr.tar.zst`), but the **folder** comes
+from step. The local archive and the SSH mirror (if configured) continue
+to route by PatientID — the asymmetry is deliberate.
+
+### Permission caveats
+
+Files inside the share appear owned by the mount user (set via `uid=` in
+fstab — typically the receiver's service account like `radmin`). You
+**cannot** make `<mount>/SophieLab/foo.tar.zst` appear owned by any
+individual user — that's a property of SMB, not a bug. Per-user access
+is enforced by **server-side share / NTFS ACLs**, not POSIX ownership.
+The `chmod 0666` the script applies is best-effort; cifs may ignore it
+in favour of server-side ACLs, which is fine.
 
 
 ## One-time setup (Ubuntu/Debian receiver)

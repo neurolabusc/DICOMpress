@@ -167,13 +167,24 @@ def mirror_to_ssh(local_path, patient_id):
     print(f"Mirrored to {ssh_cfg['user']}@{ssh_cfg['host']}:{remote_target}")
 
 
-def mirror_to_smb(local_path, patient_id):
+def mirror_to_smb(local_path, step):
     """Optionally mirror the archive to an SMB share mounted locally.
 
-    The mount itself is expected to be managed outside this script (typically
-    /etc/fstab with `_netdev,nofail`). If the mount is missing — share offline,
-    firewall blocking, network down — we log and skip. The local archive is
-    unaffected; a later study will pick up the mount once it returns.
+    Routing on SMB is by the first word of `step` (the sanitised
+    PerformedProcedureStepDescription), NOT by PatientID — SMB shares
+    here are lab-collaboration surfaces where server-side ACLs scope
+    visibility per-lab-folder. If the first word of `step` contains
+    "lab" (case-insensitive substring), the archive lands in
+    `<mount>/<first_word>/`; otherwise it falls back to `<mount>/guest/`.
+    Folder is auto-created on first use. Files are written 0666 (RW for
+    everyone); per-lab visibility is enforced at the share/ACL level on
+    the SMB server, not via POSIX file permissions.
+
+    The mount itself is managed outside this script (typically /etc/fstab
+    with `_netdev,nofail`). If the mount is missing — share offline,
+    firewall blocking, network down — we log and skip; local archiving
+    and other mirrors are unaffected. A later study will pick up the
+    mount once it returns.
     """
     smb_cfg = CONFIG.get("smb") or {}
     mount_point = smb_cfg.get("mount_point")
@@ -185,14 +196,12 @@ def mirror_to_smb(local_path, patient_id):
         print(f"SMB mirror: {mount_point} is not mounted; skipping.")
         return
 
-    # The SMB mirror auto-creates a folder for each PatientID — unlike the
-    # local and SSH mirror paths, where patient folders must already exist
-    # and unknown IDs fall through to guest. SMB is typically used as a
-    # collaboration surface (everyone-can-see-via-Samba) rather than a
-    # per-user home, so making the per-lab folder the first time we see the
-    # ID is the friendlier default.
-    dest = mp / patient_id
-    is_guest = (patient_id == "guest")
+    # step is already sanitised (whitespace -> '-'), so split on '-' to
+    # recover the original first word.
+    first_word = step.split("-")[0] if step else ""
+    folder_name = first_word if "lab" in first_word.lower() else "guest"
+
+    dest = mp / folder_name
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -206,10 +215,10 @@ def mirror_to_smb(local_path, patient_id):
         print(f"SMB mirror: copy failed: {e}")
         return
 
-    # Best-effort chmod for parity with the SSH mirror. cifs may not honour
-    # POSIX chmod (server-side ACLs win) — silently fine if it doesn't stick.
+    # 0666 unconditionally — per-lab access lives in server-side ACLs.
+    # cifs may ignore POSIX chmod entirely; silently fine if it doesn't stick.
     try:
-        target.chmod(0o666 if is_guest else 0o664)
+        target.chmod(0o666)
     except OSError:
         pass
 
@@ -279,9 +288,10 @@ def process_study(study_dir):
 
     # Optional mirrors — each is independently configured in config.json and
     # is a no-op when its block is absent or its destination is unreachable.
-    # Both can run for the same study if both are configured.
+    # Both can run for the same study if both are configured. SSH routes by
+    # PatientID; SMB routes by the first word of step (see mirror_to_smb).
     mirror_to_ssh(final_path, patient_id)
-    mirror_to_smb(final_path, patient_id)
+    mirror_to_smb(final_path, step)
 
     # Cleanup: Delete original DICOMs
     shutil.rmtree(study_path)
