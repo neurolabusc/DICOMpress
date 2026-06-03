@@ -167,15 +167,18 @@ def mirror_to_ssh(local_path, patient_id):
     print(f"Mirrored to {ssh_cfg['user']}@{ssh_cfg['host']}:{remote_target}")
 
 
-def mirror_to_smb(local_path, step):
+def mirror_to_smb(local_path, study_desc):
     """Optionally mirror the archive to an SMB share mounted locally.
 
-    Routing on SMB is by the first word of `step` (the sanitised
-    PerformedProcedureStepDescription), NOT by PatientID — SMB shares
+    Routing on SMB is by the first word of `study_desc` (the sanitised
+    StudyDescription, DICOM tag 0008,1030), NOT by PatientID — SMB shares
     here are lab-collaboration surfaces where server-side ACLs scope
-    visibility per-lab-folder. If the first word of `step` contains
+    visibility per-lab-folder. If the first word of `study_desc` contains
     "lab" (case-insensitive substring), the archive lands in
-    `<mount>/<first_word>/`; otherwise it falls back to `<mount>/guest/`.
+    `<mount>/<first_word_lowercased>/`; otherwise it falls back to
+    `<mount>/guest/`. Folder names are lower-cased so all lab folders
+    sort/group consistently regardless of how the scanner cased the tag
+    (`SophieLab TMS` and `sophielab TMS` both land in `sophielab/`).
     Folder is auto-created on first use. Files are written 0666 (RW for
     everyone); per-lab visibility is enforced at the share/ACL level on
     the SMB server, not via POSIX file permissions.
@@ -196,10 +199,10 @@ def mirror_to_smb(local_path, step):
         print(f"SMB mirror: {mount_point} is not mounted; skipping.")
         return
 
-    # step is already sanitised (whitespace -> '-'), so split on '-' to
-    # recover the original first word.
-    first_word = step.split("-")[0] if step else ""
-    folder_name = first_word if "lab" in first_word.lower() else "guest"
+    # study_desc is already sanitised (whitespace -> '-'), so split on '-'
+    # to recover the original first word.
+    first_word = study_desc.split("-")[0] if study_desc else ""
+    folder_name = first_word.lower() if "lab" in first_word.lower() else "guest"
 
     dest = mp / folder_name
     try:
@@ -247,7 +250,7 @@ def process_study(study_dir):
             patient_id = "guest"
             id_for_filename = ""
         patient_name = sanitize(getattr(ds, 'PatientName', 'unknown'))
-        step = sanitize(getattr(ds, 'PerformedProcedureStepDescription', ''))
+        study_desc = sanitize(getattr(ds, 'StudyDescription', ''))
         # Strip non-digits — DICOM rarely has them, but a stray '/' would
         # turn the archive_name into an unintended subdirectory.
         study_date = re.sub(r'[^0-9]', '', str(getattr(ds, 'StudyDate', '00000000')))
@@ -262,14 +265,14 @@ def process_study(study_dir):
         dest_folder = GUEST_DIR
     dest_folder.mkdir(parents=True, exist_ok=True)
 
-    # Prepare archive name: YYYYMMDD-hhmmss_name[_step][_id].tar.zst.
+    # Prepare archive name: YYYYMMDD-hhmmss_name[_studydesc][_id].tar.zst.
     # Items are joined by '_'; within-item compounds (date-time, sanitized
-    # whitespace, etc.) use '-'. patient_name, step and id are each appended
-    # only when non-empty after sanitize (and, for id, valid — see
-    # id_for_filename), so an item that sanitises to '' doesn't leave a
-    # stray '__' in the filename.
+    # whitespace, etc.) use '-'. patient_name, study_desc and id are each
+    # appended only when non-empty after sanitize (and, for id, valid —
+    # see id_for_filename), so an item that sanitises to '' doesn't leave
+    # a stray '__' in the filename.
     parts = [f"{study_date}-{study_time}"]
-    for item in (patient_name, step, id_for_filename):
+    for item in (patient_name, study_desc, id_for_filename):
         if item:
             parts.append(item)
     archive_name = "_".join(parts) + ".tar.zst"
@@ -289,9 +292,10 @@ def process_study(study_dir):
     # Optional mirrors — each is independently configured in config.json and
     # is a no-op when its block is absent or its destination is unreachable.
     # Both can run for the same study if both are configured. SSH routes by
-    # PatientID; SMB routes by the first word of step (see mirror_to_smb).
+    # PatientID; SMB routes by the first word of StudyDescription
+    # (see mirror_to_smb).
     mirror_to_ssh(final_path, patient_id)
-    mirror_to_smb(final_path, step)
+    mirror_to_smb(final_path, study_desc)
 
     # Cleanup: Delete original DICOMs
     shutil.rmtree(study_path)

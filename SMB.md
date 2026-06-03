@@ -36,43 +36,51 @@ per study if both are configured.
 
 ## How destination resolution works
 
-The SMB mirror routes by **the first word of `PerformedProcedureStepDescription`
-(DICOM tag `(0040,0254)`)**, NOT by PatientID. This is intentional — SMB
+The SMB mirror routes by **the first word of `StudyDescription`
+(DICOM tag `(0008,1030)`)**, NOT by PatientID. This is intentional — SMB
 shares are typically lab-collaboration surfaces where server-side ACLs
 scope visibility per-lab-folder, so routing by lab name matches the
 access model better than routing by patient.
 
 Rule:
 
-> If the **first word** of `PerformedProcedureStepDescription` contains
-> the substring **"lab"** (case-insensitive), the archive lands in
-> `<mount_point>/<first_word>/`. Otherwise it lands in `<mount_point>/guest/`.
+> If the **first word** of `StudyDescription` contains the substring
+> **"lab"** (case-insensitive), the archive lands in
+> `<mount_point>/<first_word_lowercased>/`. Otherwise it lands in
+> `<mount_point>/guest/`.
+
+The folder name is **always lower-cased** — so `SophieLab`,
+`sophielab`, and `SOPHIELAB` in `StudyDescription` all converge on the
+same `sophielab/` folder, regardless of how the scanner cased the tag.
 
 The folder is auto-created on first use, and files are written with
 mode `0666` (RW for everyone) — per-lab visibility is enforced at the
 share / NTFS-ACL level on the server, not via POSIX file permissions.
 
-`step` is already sanitised by the time `mirror_to_smb` sees it (spaces
-and forbidden characters replaced with `-`), so the script splits on
-`-` to recover the original first word.
+`study_desc` is already sanitised by the time `mirror_to_smb` sees it
+(spaces and forbidden characters replaced with `-`), so the script
+splits on `-` to recover the original first word and then lowercases it.
 
 ### Examples
 
-| `PerformedProcedureStepDescription` | sanitised `step` | first word | contains "lab"? | lands in |
+| `StudyDescription` | sanitised | first word | contains "lab"? | lands in |
 |---|---|---|---|---|
-| `SophieLab TMS` | `SophieLab-TMS` | `SophieLab` | ✓ | `<mount>/SophieLab/…` |
+| `SophieLab TMS` | `SophieLab-TMS` | `SophieLab` | ✓ | `<mount>/sophielab/…` |
+| `sophielab TMS` (already lowercase) | `sophielab-TMS` | `sophielab` | ✓ | `<mount>/sophielab/…` |
+| `SOPHIELAB TMS` (uppercase) | `SOPHIELAB-TMS` | `SOPHIELAB` | ✓ | `<mount>/sophielab/…` |
 | `BrainHealth AgingBrain` | `BrainHealth-AgingBrain` | `BrainHealth` | ✗ | `<mount>/guest/…` |
 | `Research MCBI TESTING` | `Research-MCBI-TESTING` | `Research` | ✗ | `<mount>/guest/…` |
-| `Lab` (alone) | `Lab` | `Lab` | ✓ | `<mount>/Lab/…` |
-| `Sophielab tms` (lowercase) | `Sophielab-tms` | `Sophielab` | ✓ | `<mount>/Sophielab/…` (case preserved) |
+| `Lab` (alone) | `Lab` | `Lab` | ✓ | `<mount>/lab/…` |
 | _(tag missing or empty)_ | `""` | `""` | ✗ | `<mount>/guest/…` |
 | `Test Lab Run` (lab not first) | `Test-Lab-Run` | `Test` | ✗ | `<mount>/guest/…` |
 
 Note: PatientID is **not** used for SMB routing. It still appears as the
 trailing component of the archive **filename** (e.g.
-`20260603-133744_RO_SophieLab-TMS_cr.tar.zst`), but the **folder** comes
-from step. The local archive and the SSH mirror (if configured) continue
-to route by PatientID — the asymmetry is deliberate.
+`20260603-133744_RO_SophieLab-TMS_cr.tar.zst` — note the filename
+preserves the original casing; only the **folder** is lowercased), but
+the folder comes from `StudyDescription`. The local archive and the SSH
+mirror (if configured) continue to route by PatientID — the asymmetry
+is deliberate.
 
 ### Permission caveats
 

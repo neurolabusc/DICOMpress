@@ -25,16 +25,18 @@ module-level code (config load, BASE_DIR resolution) runs every time.
   `/nonexistent` for the system `guest` user, which is *not* the same path
   as `/volume1/home/guest`.
 - **REMOTE (SMB mirror)**: routes by **the first word of
-  `PerformedProcedureStepDescription`**, NOT by PatientID. If that word
+  `StudyDescription` (0008,1030)**, NOT by PatientID. If that word
   contains the substring `lab` (case-insensitive), the archive lands in
-  `<mount_point>/<first_word>/`; otherwise `<mount_point>/guest/`. The
-  folder is auto-created on first use; files written `0666` (per-lab
-  visibility lives in server-side share/NTFS ACLs, not POSIX). This is
-  intentionally different from local + SSH PatientID-based routing — SMB
-  shares are lab-collaboration surfaces, not per-user homes. The mount
-  itself is managed outside the script (fstab `_netdev,nofail` +
-  `x-systemd.automount`), so the script no-ops when the share is offline
-  rather than blocking local archiving.
+  `<mount_point>/<first_word_lowercased>/`; otherwise
+  `<mount_point>/guest/`. Folder name is always lowercased so casing
+  variants converge (`SophieLab` / `sophielab` / `SOPHIELAB` all → 
+  `sophielab/`). The folder is auto-created on first use; files written
+  `0666` (per-lab visibility lives in server-side share/NTFS ACLs, not
+  POSIX). This is intentionally different from local + SSH
+  PatientID-based routing — SMB shares are lab-collaboration surfaces,
+  not per-user homes. The mount itself is managed outside the script
+  (fstab `_netdev,nofail` + `x-systemd.automount`), so the script
+  no-ops when the share is offline rather than blocking local archiving.
 
 The two mirror modes (`ssh` and `smb`) are independently configurable; each
 runs only if its block is present in `config.json`, and they can run for

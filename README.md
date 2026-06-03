@@ -170,14 +170,14 @@ ls -lh ~/crlab/                # only if you mkdir'd it first
 Each archive is named:
 
 ```
-YYYYMMDD-hhmmss_<PatientName>[_<Step>][_<PatientID>].tar.zst
+YYYYMMDD-hhmmss_<PatientName>[_<StudyDesc>][_<PatientID>].tar.zst
 ```
 
 | Segment | DICOM tag | Notes |
 |---|---|---|
 | `YYYYMMDD-hhmmss` | `StudyDate` (0008,0020) + `StudyTime` (0008,0030) | joined by `-` |
 | `<PatientName>` | `PatientName` (0010,0010) | defaults to `unknown` if missing |
-| `<Step>` | `PerformedProcedureStepDescription` (0040,0254) | omitted when absent |
+| `<StudyDesc>` | `StudyDescription` (0008,1030) | omitted when absent |
 | `<PatientID>` | `PatientID` (0010,0020) | omitted when absent or path-traversal-rejected |
 
 **Two-tier delimiters.** Items are separated by `_`; within an item, `-` is
@@ -363,13 +363,16 @@ semantics, troubleshooting — is in [SMB.md](SMB.md).
 
 Folder semantics worth knowing without opening that file:
 
-- The SMB mirror routes by **the first word of `PerformedProcedureStepDescription`**
-  (`(0040,0254)`), not by PatientID. If that word contains `lab`
-  (case-insensitive), the archive lands in `<mount>/<first_word>/`
-  (e.g. PPSD `SophieLab TMS` → `<mount>/SophieLab/…`). Otherwise it
-  falls back to `<mount>/guest/`. The folder is auto-created on first
-  use. The local archive and the SSH mirror (if configured) keep their
-  PatientID-based routing — this asymmetry is deliberate.
+- The SMB mirror routes by **the first word of `StudyDescription`**
+  (`(0008,1030)`), not by PatientID. If that word contains `lab`
+  (case-insensitive), the archive lands in
+  `<mount>/<first_word_lowercased>/` (e.g. `StudyDescription =
+  SophieLab TMS` → `<mount>/sophielab/…`). Otherwise it falls back to
+  `<mount>/guest/`. The folder name is always lower-cased so casing
+  variants (`SophieLab`, `sophielab`, `SOPHIELAB`) all converge on the
+  same folder. The folder is auto-created on first use. The local
+  archive and the SSH mirror (if configured) keep their PatientID-based
+  routing — this asymmetry is deliberate.
 - Files are written `0666` (RW for everyone). Per-lab visibility is
   enforced by server-side share / NTFS ACLs on the SMB server, not via
   POSIX file permissions — which is why everyone-writable is fine in
