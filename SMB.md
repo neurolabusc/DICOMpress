@@ -76,11 +76,12 @@ splits on `-` to recover the original first word and then lowercases it.
 
 Note: PatientID is **not** used for SMB routing. It still appears as the
 trailing component of the archive **filename** (e.g.
-`20260603-133744_RO_SophieLab-TMS_cr.tar.zst` — note the filename
-preserves the original casing; only the **folder** is lowercased), but
-the folder comes from `StudyDescription`. The local archive and the SSH
-mirror (if configured) continue to route by PatientID — the asymmetry
-is deliberate.
+`20260603-133744_RO_MRC35131_SophieLab-TMS_cr.tar.zst` — `MRC35131` is
+the optional StationName slot; note the filename preserves the original
+casing of `SophieLab` even though the **folder** is lowercased to
+`sophielab/`), but the folder comes from `StudyDescription`. The local
+archive and the SSH mirror (if configured) continue to route by
+PatientID — the asymmetry is deliberate.
 
 ### Permission caveats
 

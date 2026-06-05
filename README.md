@@ -160,8 +160,9 @@ ran `mkdir ~/crlab` first, the archive lands in `~/guest/`:
 ```bash
 ls -lh ~/guest/                # default landing zone for the bundled demo
 ls -lh ~/crlab/                # only if you mkdir'd it first
-# expect: 20140310-133834_stc-test_Research-MCBI-TESTING_crlab.tar.zst
-# (date and time come from the DICOM tags, not the wall clock)
+# expect: 20140310-133834_stc-test_MRC35131_Research-MCBI-TESTING_crlab.tar.zst
+# (date and time come from the DICOM tags, not the wall clock; MRC35131 is
+# the StationName from the demo, Research-MCBI-TESTING is StudyDescription)
 ```
 
 
@@ -170,13 +171,14 @@ ls -lh ~/crlab/                # only if you mkdir'd it first
 Each archive is named:
 
 ```
-YYYYMMDD-hhmmss_<PatientName>[_<StudyDesc>][_<PatientID>].tar.zst
+YYYYMMDD-hhmmss_<PatientName>[_<StationName>][_<StudyDesc>][_<PatientID>].tar.zst
 ```
 
 | Segment | DICOM tag | Notes |
 |---|---|---|
 | `YYYYMMDD-hhmmss` | `StudyDate` (0008,0020) + `StudyTime` (0008,0030) | joined by `-` |
 | `<PatientName>` | `PatientName` (0010,0010) | defaults to `unknown` if missing |
+| `<StationName>` | `StationName` (0008,1010) | omitted when absent (e.g. `MRC35131`, `AWP66080`) |
 | `<StudyDesc>` | `StudyDescription` (0008,1030) | omitted when absent |
 | `<PatientID>` | `PatientID` (0010,0020) | omitted when absent or path-traversal-rejected |
 

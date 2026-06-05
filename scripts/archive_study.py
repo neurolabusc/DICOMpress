@@ -250,6 +250,7 @@ def process_study(study_dir):
             patient_id = "guest"
             id_for_filename = ""
         patient_name = sanitize(getattr(ds, 'PatientName', 'unknown'))
+        station_name = sanitize(getattr(ds, 'StationName', ''))
         study_desc = sanitize(getattr(ds, 'StudyDescription', ''))
         # Strip non-digits — DICOM rarely has them, but a stray '/' would
         # turn the archive_name into an unintended subdirectory.
@@ -265,14 +266,15 @@ def process_study(study_dir):
         dest_folder = GUEST_DIR
     dest_folder.mkdir(parents=True, exist_ok=True)
 
-    # Prepare archive name: YYYYMMDD-hhmmss_name[_studydesc][_id].tar.zst.
+    # Prepare archive name:
+    # YYYYMMDD-hhmmss_name[_station][_studydesc][_id].tar.zst.
     # Items are joined by '_'; within-item compounds (date-time, sanitized
-    # whitespace, etc.) use '-'. patient_name, study_desc and id are each
-    # appended only when non-empty after sanitize (and, for id, valid —
-    # see id_for_filename), so an item that sanitises to '' doesn't leave
-    # a stray '__' in the filename.
+    # whitespace, etc.) use '-'. patient_name, station_name, study_desc and
+    # id are each appended only when non-empty after sanitize (and, for id,
+    # valid — see id_for_filename), so an item that sanitises to '' doesn't
+    # leave a stray '__' in the filename.
     parts = [f"{study_date}-{study_time}"]
-    for item in (patient_name, study_desc, id_for_filename):
+    for item in (patient_name, station_name, study_desc, id_for_filename):
         if item:
             parts.append(item)
     archive_name = "_".join(parts) + ".tar.zst"
