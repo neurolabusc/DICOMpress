@@ -8,7 +8,6 @@ import tarfile
 import shutil
 import re
 import zstandard as zstd
-from datetime import datetime
 from pathlib import Path
 
 # --- Configuration ---
@@ -65,7 +64,7 @@ def get_unique_path(target_path):
     if not target_path.exists():
         return target_path
 
-    stem = target_path.name.split('.tar.zst')[0]
+    stem = target_path.name.removesuffix('.tar.zst')
     ext = ".tar.zst"
     counter = 0
     suffixes = "abcdefghijklmnopqrstuvwxyz"
@@ -200,9 +199,11 @@ def mirror_to_smb(local_path, study_desc):
         return
 
     # study_desc is already sanitised (whitespace -> '-'), so split on '-'
-    # to recover the original first word.
-    first_word = study_desc.split("-")[0] if study_desc else ""
-    folder_name = first_word.lower() if "lab" in first_word.lower() else "guest"
+    # to recover the original first word. The '..' guard is defence-in-depth:
+    # sanitize() doesn't strip mid-string dots, so a future tweak could
+    # otherwise enable folder names like 'sophie..lab' as a path-component.
+    lowered = (study_desc or "").split("-")[0].lower()
+    folder_name = lowered if "lab" in lowered and ".." not in lowered else "guest"
 
     dest = mp / folder_name
     try:
@@ -211,11 +212,18 @@ def mirror_to_smb(local_path, study_desc):
         print(f"SMB mirror: could not create {dest}: {e}")
         return
 
+    # Atomic publish: write to <name>.part then rename. Without this, a CIFS
+    # disconnect mid-copy would leave a partial .tar.zst at the final name,
+    # and any client watching the share (Finder / inotify) would see a
+    # corrupt file. Same-directory rename is atomic on POSIX and on cifs.
     target = dest / local_path.name
+    tmp = dest / (local_path.name + ".part")
     try:
-        shutil.copy(local_path, target)
+        shutil.copy(local_path, tmp)
+        tmp.rename(target)
     except OSError as e:
         print(f"SMB mirror: copy failed: {e}")
+        tmp.unlink(missing_ok=True)
         return
 
     # 0666 unconditionally — per-lab access lives in server-side ACLs.

@@ -49,6 +49,13 @@ the same study.
 - **Loud-on-bad-config**: malformed `config.json` logs a warning and falls
   back to `CONFIG = {}` (mirror disabled, default `base_dir`). Local archiving
   still works. Don't replace this with a silent swallow that hides typos.
+- **Config file mode-check**: `archive_study.py` refuses to load
+  `config.json` if its mode has any group-write or world-write bit set
+  (`& 0o022`). The check exists because anyone who can write the file
+  could redirect the SSH/SMB mirror or change `base_dir`. Same trust
+  model as sshd's policy on key files. If a future audit flags this as
+  "over-defensive", don't drop it — the threat model is real for shared
+  receivers.
 - **No silent system-root creation**: `BASE_DIR` is validated at module load.
   A missing directory triggers a warning and fallback to `Path.home()` rather
   than `mkdir -p` materializing `/srv/dicom` from a typo.
@@ -73,6 +80,22 @@ the same study.
   of the SMB protocol, not a bug. Per-user access is enforced via server-side
   share/NTFS ACLs, not POSIX. Don't reintroduce a symlink-to-guest scheme:
   SMB clients (Windows in particular) handle symlinks inconsistently.
+- **SMB atomic publish (`.part` rename)**: `mirror_to_smb` writes to
+  `<target>.part` then `rename`s to `<target>`. Without this, a CIFS
+  disconnect mid-copy would leave a partial `.tar.zst` at the final name
+  and any client watching the share (Finder / inotify) would see a
+  corrupt file. Same-directory rename is atomic on POSIX and on cifs.
+  Don't "simplify" back to a direct `shutil.copy(local_path, target)`.
+- **`PREFER_TS = "--promiscuous --prefer-lossless"`** in
+  `start_storescp.sh` is the validated default. `--promiscuous` accepts
+  unknown SOP classes so the scanner isn't artificially limited;
+  `--prefer-lossless` steers TS negotiation toward JPEG Lossless when
+  the scanner offers it. **Real-world finding**: Siemens XA scanners
+  don't transcode at send time — they pick the accepted context that
+  matches the file's on-disk encoding. So `--prefer-lossless` is a
+  no-op against most XA studies unless the scanner is configured to
+  store compressed. Don't conclude the receiver is "broken" if archives
+  arrive uncompressed; that's the scanner side.
 
 ## Common gotchas
 
@@ -90,6 +113,43 @@ the same study.
   inside the tar; new ones extract files at the archive root. The change
   was deliberate — don't reintroduce the wrapper. Both layouts coexist
   on disk for sites that have been running across the change.
+- **SMB mount gotchas** (full detail in [SMB.md](SMB.md)):
+  - `dir_mode=02775` in fstab needs the leading zero; `mount.cifs`
+    silently parses `dir_mode=2775` as decimal (= octal `05327`,
+    `--wx-w-rwx`, owner-no-read), and `ls` returns "Permission denied"
+    on the otherwise-mounted share.
+  - With `x-systemd.automount` the share doesn't appear in `mount`
+    output until first access. That's not a broken mount; touching
+    the path (or running the receiver) triggers it.
+  - Linux `smbclient` / `mount.cifs` default to domain `WORKGROUP`
+    when none is supplied. AD-managed shares fail with
+    `NT_STATUS_LOGON_FAILURE` until you pass `-W` / `domain=` in the
+    credentials file.
+
+## Deployment state (current production)
+
+Captured here so a future AI assistant clearing context isn't surprised:
+
+- **Receiver host**: Ubuntu 24.04 (codoitrcdatahub-mp15 / `cosomc-mp15dicom`),
+  service account `radmin`, venv at `/home/radmin/DICOMpress-venv`,
+  scripts deployed at `/usr/local/bin/{start_storescp.sh,archive_study.py}`,
+  log at `/home/radmin/storescp.log` (ISO-8601 timestamped), `@reboot`
+  cron line in radmin's crontab. `base_dir: "/home"` in config so
+  archives land at `/home/<PatientID>/`.
+- **Active mirror**: SMB only. `/etc/cifs-creds-dicompress` (mode 600,
+  root:root) feeds `/etc/fstab`'s mount of `//codoitrcdatahub.ds.sc.edu/rorden_test`
+  at `/mnt/dicom-mirror`. `_netdev,nofail,x-systemd.automount` so the
+  receiver boots cleanly when the share is unreachable.
+- **SSH mirror feature is in the code/docs but disabled in production**:
+  the `"ssh"` block was removed from radmin's `config.json` on the
+  receiver. The mechanism is fully retained for other deployments — don't
+  delete `mirror_to_ssh`, `_resolve_remote_dir`, or `REMOTE_HOME_ROOTS`
+  on the assumption the feature is "unused". Site-specific
+  ASUSTOR-target details live in [docs/asustor-mirror.md](docs/asustor-mirror.md).
+- **Scanner**: Siemens XA60 (MR), AETitle `SCANNER`, sends to AET
+  `PY_STORE_SCP` on port 11112. Real-world studies have
+  `StudyDescription` populated when the technologist sets it; some
+  non-MR SOP classes leave it empty (those route to `<mount>/guest/`).
 
 ## Things to do (if asked) and not to do
 
