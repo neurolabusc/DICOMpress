@@ -3,9 +3,13 @@
 
 # Python virtual environment created during install
 venv/
+__pycache__/
 
 # OS detritus
 .DS_Store
+
+# Teams webhook URLs saved by teams_notifier.py (post-to-channel credentials)
+.env
 
 # Project-local Claude Code agent settings
 .claude/

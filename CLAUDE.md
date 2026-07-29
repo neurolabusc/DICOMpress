@@ -161,9 +161,31 @@ Captured here so a future AI assistant clearing context isn't surprised:
 - **Prefer** updating the existing README sections over adding new ones
   for small features — keeps the surface area readable.
 
+## Teams notifications (optional)
+
+- `scripts/teams_notifier.py` posts Legacy-MessageCard webhooks:
+  `TEAMS_WEBHOOK_ERROR` on archive failure, `TEAMS_WEBHOOK_LOG` per-study
+  success summary. URLs resolve env → `.env` beside the script →
+  `~/.config/dicompress/.env`; `check_and_prompt_teams_webhooks()` prompts
+  **only when stdin is a TTY** (storescp/cron runs are headless — never add
+  an unconditional `input()`). Prompted URLs persist to `.env` mode 600
+  (webhook URLs are post-to-channel credentials).
+- `send_teams_alert()` deliberately catches all exceptions — the notifier
+  must never break archiving. This is a sanctioned exception to the
+  no-silent-swallow policy below, but it still prints to the console.
+- The `__main__` wrapper in `archive_study.py` re-raises after sending the
+  error alert so storescp's log keeps the full traceback — don't swallow it.
+- Success summaries contain the archive filename (embeds the PatientName/ID
+  tags). In the current deployment these are study codes, not real patient
+  names, so this is fine — but the README notes the caveat for sites that
+  send real identifiers; don't add more tag values to the log payload
+  casually.
+
 ## Files
 
 - `scripts/archive_study.py` — the Python side, run per study.
+- `scripts/teams_notifier.py` — optional Teams webhook alerts (stdlib only),
+  imported by `archive_study.py`; deploy the two files together.
 - `scripts/start_storescp.sh` — launches storescp; `PYTHON_BIN`/`STORES_BIN`
   are absolute paths edited at install time.
 - `scripts/config.example.json` — template for `~/.config/dicompress/config.json`.
