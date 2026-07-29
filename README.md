@@ -108,6 +108,7 @@ chmod +x ./scripts/*.sh ./scripts/*.py
 ```bash
 sudo cp ./scripts/start_storescp.sh /usr/local/bin/
 sudo cp ./scripts/archive_study.py  /usr/local/bin/
+sudo cp ./scripts/teams_notifier.py /usr/local/bin/   # imported by archive_study.py
 ```
 
 ### Step 7 — Auto-start on reboot (cron)
@@ -245,6 +246,47 @@ the same setgid trick used for the SSH mirror works locally: `sudo chgrp <admin-
 This setting and the `ssh` / `smb` mirror blocks below can all coexist in the
 same config file; each block is independently optional.
 
+
+## Optional: Microsoft Teams notifications
+
+`archive_study.py` can post to Microsoft Teams via incoming webhooks: an
+error alert when a study fails to archive (`TEAMS_WEBHOOK_ERROR`) and a
+per-study success summary (`TEAMS_WEBHOOK_LOG`). Both are **off by default**
+and independently optional — set one, both, or neither. No new Python
+dependency (standard-library `urllib` only).
+
+URLs resolve from, in order: the process environment, a `.env` file next to
+the script, then `~/.config/dicompress/.env`. To set them up interactively,
+run the script once from a terminal — it prompts for any missing URL and
+saves your answers to a `.env` file (mode 600) so headless storescp/cron runs
+pick them up:
+
+```bash
+./venv/bin/python3 ./scripts/archive_study.py
+# TEAMS_WEBHOOK_ERROR is not set. Enter Microsoft Teams Webhook URL for Errors (or press Enter to skip):
+```
+
+Or write the file yourself:
+
+```bash
+cat > ~/.config/dicompress/.env <<'EOF'
+TEAMS_WEBHOOK_ERROR=https://example.webhook.office.com/webhookb2/...
+TEAMS_WEBHOOK_LOG=https://example.webhook.office.com/webhookb2/...
+EOF
+chmod 600 ~/.config/dicompress/.env
+```
+
+Headless runs never prompt: if a URL is missing, that channel is simply
+disabled. Webhook failures (timeouts, bad URL, Teams outage) are logged to
+the console and never interrupt archiving or mirroring. Both legacy
+Office-365 connector URLs (`*.webhook.office.com`, HTTP 200) and
+Power-Automate workflow URLs (HTTP 202) are accepted.
+
+> **Note:** success summaries include the archive filename, which embeds the
+> PatientName/PatientID DICOM tags. In research deployments these are
+> typically study codes rather than real names; if your scanners send real
+> patient identifiers, point `TEAMS_WEBHOOK_LOG` only at a channel whose
+> membership is appropriate for that, or leave it unset.
 
 ## Optional: mirror archives to a remote SSH server
 
@@ -406,6 +448,7 @@ Folder semantics worth knowing without opening that file:
     ├── requirements.txt         # pydicom, zstandard
     ├── start_storescp.sh        # launches storescp, set PYTHON_BIN here
     ├── archive_study.py         # sorts & compresses each completed study
+    ├── teams_notifier.py        # optional Microsoft Teams webhook alerts
     └── config.example.json      # template for ~/.config/dicompress/config.json
 ```
 

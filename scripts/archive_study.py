@@ -10,6 +10,10 @@ import re
 import zstandard as zstd
 from pathlib import Path
 
+# Deployed alongside this script (both live in scripts/ and are copied to
+# /usr/local/bin together) — Python resolves the import via the script's dir.
+from teams_notifier import check_and_prompt_teams_webhooks, send_teams_alert
+
 # --- Configuration ---
 TEMP_DICOM_ROOT = Path("/tmp/dicom_incoming") # Should match storescp -od
 CONFIG_PATH = Path.home() / ".config" / "dicompress" / "config.json"
@@ -266,6 +270,9 @@ def process_study(study_dir):
         study_time = re.sub(r'[^0-9]', '', str(getattr(ds, 'StudyTime', '000000')))[:6]
     except Exception as e:
         print(f"Error reading DICOM: {e}")
+        # The study dir is left in place for manual recovery, so this return
+        # is otherwise invisible in Teams — alert explicitly.
+        send_teams_alert(f"Error reading DICOM metadata in {study_path}: {e}", level="error")
         return
 
     # Determine destination folder
@@ -311,6 +318,16 @@ def process_study(study_dir):
     shutil.rmtree(study_path)
     print("Cleanup complete.")
 
+    size_mb = final_path.stat().st_size / 1_000_000
+    return f"Archived {len(dicom_files)} file(s) to {final_path} ({size_mb:.1f} MB)"
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        process_study(sys.argv[1])
+        check_and_prompt_teams_webhooks()
+        try:
+            summary = process_study(sys.argv[1])
+        except Exception as e:
+            send_teams_alert(f"{type(e).__name__}: {e} (study dir: {sys.argv[1]})", level="error")
+            raise  # keep the loud traceback in storescp's log
+        if summary:
+            send_teams_alert(summary, level="log")
