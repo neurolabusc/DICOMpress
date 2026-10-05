@@ -170,6 +170,14 @@ Captured here so a future AI assistant clearing context isn't surprised:
   **only when stdin is a TTY** (storescp/cron runs are headless — never add
   an unconditional `input()`). Prompted URLs persist to `.env` mode 600
   (webhook URLs are post-to-channel credentials).
+- **Mirror failures must alert.** Every non-success exit from
+  `mirror_to_ssh` / `mirror_to_smb` goes through `_mirror_failed()`, which
+  prints *and* posts to `TEAMS_WEBHOOK_ERROR`. Both functions return
+  `None` (not configured) / `True` / `False`, and `process_study()` stamps
+  `; SMB mirror OK|FAILED` onto the success summary. This exists because a
+  silent `print(...); return` on the not-mounted path let un-mirrored
+  archives go unnoticed in production — don't add a new failure `return`
+  in either mirror function that bypasses `_mirror_failed`.
 - `send_teams_alert()` deliberately catches all exceptions — the notifier
   must never break archiving. This is a sanctioned exception to the
   no-silent-swallow policy below, but it still prints to the console.

@@ -278,7 +278,15 @@ chmod 600 ~/.config/dicompress/.env
 
 Headless runs never prompt: if a URL is missing, that channel is simply
 disabled. Webhook failures (timeouts, bad URL, Teams outage) are logged to
-the console and never interrupt archiving or mirroring. Both legacy
+the console and never interrupt archiving or mirroring.
+
+The error channel fires when a study fails to archive **and** when a
+configured mirror (SSH or SMB) fails for any reason — share not mounted,
+folder not creatable, copy or `scp` error. The local archive is still
+written in that case; the alert names it so an operator can copy it over
+by hand, because skipped mirrors are not retried. The success summary also
+ends with `; SMB mirror OK` / `; SMB mirror FAILED` (likewise for SSH) so
+the log channel never reads as a clean run when a mirror was skipped. Both legacy
 Office-365 connector URLs (`*.webhook.office.com`, HTTP 200) and
 Power-Automate workflow URLs (HTTP 202) are accepted.
 
@@ -426,8 +434,10 @@ Folder semantics worth knowing without opening that file:
   Per-user POSIX ownership cannot be achieved through a single mount —
   again, use server-side ACLs for that.
 - If the mount is unreachable when a study completes, the script logs
-  `SMB mirror: /mnt/dicom-mirror is not mounted; skipping` and the
-  rest of the pipeline (local archive, SSH mirror if any) is unaffected.
+  `SMB mirror: /mnt/dicom-mirror is not mounted; skipping`, posts to
+  `TEAMS_WEBHOOK_ERROR` if configured, and the rest of the pipeline
+  (local archive, SSH mirror if any) is unaffected. The skipped archive
+  is not retried on the next study — copy it over by hand.
 
 
 ## Project layout
@@ -512,7 +522,7 @@ each lab user's Samba home.
 | Studies stop archiving and pile up in `/tmp/dicom_incoming/` | `config.json` is malformed; `archive_study.py` logs `Warning: malformed …` and continues without the mirror but you'll only see it in storescp's stderr | Validate: `python3 -m json.tool ~/.config/dicompress/config.json` |
 | `Warning: base_dir … is not a directory; falling back to home.` in storescp log | `"base_dir"` in config points at a missing path | Create it (`sudo mkdir -p <path>`) and ensure the running user can write to it; or remove the `base_dir` key |
 | `tar -xf foo.tar.zst` dumps files into the current directory instead of a subdir | Archives are now flat (no `st_<timestamp>/` wrapper) | Extract into a fresh dir: `mkdir study && tar -C study -xf foo.tar.zst`. Old archives written before the flatten still have a wrapper. |
-| `SMB mirror: /mnt/dicom-mirror is not mounted; skipping.` | Share offline, network/firewall, or `_netdev,nofail` triggered at boot | Check `mount \| grep dicom-mirror`; try `sudo mount /mnt/dicom-mirror`; verify the share is reachable: `smbclient -L //FILESERVER -A /etc/cifs-creds-dicompress` |
-| `SMB mirror: copy failed: [Errno 13] Permission denied` | Mount-point ownership mismatch (script runs as `mradmin`, mount has `uid=root`) | Fix the `uid=…` / `gid=…` options in the `/etc/fstab` line and `sudo mount -o remount /mnt/dicom-mirror` |
+| `SMB mirror: /mnt/dicom-mirror is not mounted; skipping.` (also a Teams error alert, if configured) | Share offline, network/firewall, or `_netdev,nofail` triggered at boot | Check `mount \| grep dicom-mirror`; try `sudo mount /mnt/dicom-mirror`; verify the share is reachable: `smbclient -L //FILESERVER -A /etc/cifs-creds-dicompress` |
+| `SMB mirror: copy to … failed: [Errno 13] Permission denied` (also a Teams error alert, if configured) | Mount-point ownership mismatch (script runs as `mradmin`, mount has `uid=root`) | Fix the `uid=…` / `gid=…` options in the `/etc/fstab` line and `sudo mount -o remount /mnt/dicom-mirror` |
 | All SMB archives land in `<mount>/guest/` despite a real lab name on the scanner | `StudyDescription` (0008,1030) is empty, or its first word doesn't contain "lab" (case-insensitive). Some scanners and non-MR SOP classes don't populate (0008,1030). | Confirm the scanner populates `StudyDescription` with a `*lab*` first word. SMB routes by **StudyDescription, not PatientID** — see [SMB.md](SMB.md). |
 | `ls /mnt/dicom-mirror/` returns "Permission denied" even though the mount succeeded | `dir_mode` in fstab written without leading zero (e.g. `dir_mode=2775`); `mount.cifs` parses as decimal → octal `05327` → owner has no read | Change to `dir_mode=02775` in `/etc/fstab`, then `sudo umount /mnt/dicom-mirror && sudo systemctl daemon-reload && sudo mount /mnt/dicom-mirror` |
