@@ -164,8 +164,12 @@ Captured here so a future AI assistant clearing context isn't surprised:
 ## Teams notifications (optional)
 
 - `scripts/teams_notifier.py` posts Legacy-MessageCard webhooks:
-  `TEAMS_WEBHOOK_ERROR` on archive failure, `TEAMS_WEBHOOK_LOG` per-study
-  success summary. URLs resolve env → `.env` beside the script →
+  `TEAMS_WEBHOOK_ERROR` on archive failure, `TEAMS_WEBHOOK_LOG` as a transfer
+  log with two entries per archive: `Received:` (posted in `process_study`
+  right after the local .tar.zst is written, *before* mirrors run) and
+  `Transferred:` (posted by `_mirror_succeeded` on first attempt or retry).
+  Keep that order and keep them one-per-archive — the pairing is how an
+  operator spots an un-mirrored archive on the log channel. URLs resolve env → `.env` beside the script →
   `~/.config/dicompress/.env`; `check_and_prompt_teams_webhooks()` prompts
   **only when stdin is a TTY** (storescp/cron runs are headless — never add
   an unconditional `input()`). Prompted URLs persist to `.env` mode 600
@@ -174,7 +178,7 @@ Captured here so a future AI assistant clearing context isn't surprised:
   `mirror_to_ssh` / `mirror_to_smb` goes through `_mirror_failed()`, which
   prints *and* posts to `TEAMS_WEBHOOK_ERROR`. Both functions return
   `None` (not configured) / `True` / `False`, and `process_study()` stamps
-  `; SMB mirror OK|FAILED` onto the success summary. This exists because a
+  `; SMB mirror OK|FAILED` onto the console summary. This exists because a
   silent `print(...); return` on the not-mounted path let un-mirrored
   archives go unnoticed in production — don't add a new failure `return`
   in either mirror function that bypasses `_mirror_failed`.
@@ -185,9 +189,8 @@ Captured here so a future AI assistant clearing context isn't surprised:
   Retries call the mirror functions with `retrying=True`, which makes
   `_mirror_failed` print-only — no re-alert, no re-enqueue — so a share that
   is down for a day doesn't post one Teams error per pending archive per
-  study. The pending count rides on every new failure alert and success
-  summary instead; don't "improve" visibility by alerting on retry
-  failures. The routing key is stored because the study dir (and its DICOM
+  study. The pending count rides on every new failure alert instead;
+  don't "improve" visibility by alerting on retry failures. The routing key is stored because the study dir (and its DICOM
   metadata) is gone by retry time. The queue file, its temp file and both
   lock files are created 0600 (the dir 0700 if we create it) because entries
   carry StudyDescription/PatientID; `_write_queue` goes through a temp file
@@ -201,7 +204,7 @@ Captured here so a future AI assistant clearing context isn't surprised:
   no-silent-swallow policy below, but it still prints to the console.
 - The `__main__` wrapper in `archive_study.py` re-raises after sending the
   error alert so storescp's log keeps the full traceback — don't swallow it.
-- Success summaries contain the archive filename (embeds the PatientName/ID
+- Transfer-log entries contain the archive filename (embeds the PatientName/ID
   tags). In the current deployment these are study codes, not real patient
   names, so this is fine — but the README notes the caveat for sites that
   send real identifiers; don't add more tag values to the log payload

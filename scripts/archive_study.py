@@ -254,6 +254,20 @@ def _mirror_failed(message, local_path, mirror, key, retrying):
     return False
 
 
+def _mirror_succeeded(mirror, local_path, target, retrying):
+    """Log a successful mirror and post the per-archive "Transferred" entry.
+
+    The transfer log gets two entries per archive: "Received" when the local
+    .tar.zst is written (process_study) and "Transferred" when it lands on a
+    mirror (here). Retries post the same entry, tagged, so a reader can
+    pair every Received with its Transferred regardless of outages.
+    """
+    print(f"Mirrored to {mirror.upper()}: {target}")
+    tag = " (retried from queue)" if retrying else ""
+    send_teams_alert(f"Transferred: {local_path.name} -> {mirror.upper()} {target}{tag}", level="log")
+    return True
+
+
 def mirror_to_ssh(local_path, patient_id, retrying=False):
     """Optionally mirror the archive to a remote SSH server.
 
@@ -287,8 +301,9 @@ def mirror_to_ssh(local_path, patient_id, retrying=False):
     if subprocess.run(chmod_cmd).returncode != 0:
         return failed(f"SSH mirror: chmod failed on {remote_target}.")
 
-    print(f"Mirrored to {ssh_cfg['user']}@{ssh_cfg['host']}:{remote_target}")
-    return True
+    return _mirror_succeeded(
+        "ssh", local_path, f"{ssh_cfg['user']}@{ssh_cfg['host']}:{remote_target}", retrying
+    )
 
 
 def mirror_to_smb(local_path, study_desc, retrying=False):
@@ -369,8 +384,7 @@ def mirror_to_smb(local_path, study_desc, retrying=False):
     except OSError:
         pass
 
-    print(f"Mirrored to SMB: {target}")
-    return True
+    return _mirror_succeeded("smb", local_path, target, retrying)
 
 
 MIRROR_FUNCS = {"ssh": mirror_to_ssh, "smb": mirror_to_smb}
@@ -392,7 +406,8 @@ def retry_pending_mirrors():
     Entries whose local archive has vanished, or whose mirror is no longer
     configured, are dropped with a Teams error so the operator knows that
     archive needs manual handling. Failures stay queued and print only (the
-    original alert already fired). Successes post one log-level summary.
+    original alert already fired). Each success posts its own "Transferred"
+    log entry from _mirror_succeeded.
     """
     with _FileLock("retry", blocking=False) as retry_lock:
         with _FileLock("queue"):
@@ -444,12 +459,6 @@ def retry_pending_mirrors():
             ]
             _write_queue(remaining)
 
-    if succeeded:
-        send_teams_alert(
-            f"Retried {len(succeeded)} queued mirror(s) OK: {'; '.join(succeeded)}"
-            + (f" ({len(remaining)} still pending)" if remaining else ""),
-            level="log",
-        )
     return succeeded, len(remaining)
 
 
@@ -519,15 +528,24 @@ def process_study(study_dir):
                 for child in sorted(study_path.iterdir()):
                     tar.add(child, arcname=child.name)
 
+    # Transfer-log entry 1 of 2: the study is safely archived locally. Posted
+    # before the mirrors run so it always precedes that archive's
+    # "Transferred" entry (entry 2 of 2, posted by _mirror_succeeded).
+    size_mb = final_path.stat().st_size / 1_000_000
+    send_teams_alert(
+        f"Received: {final_path.name} ({len(dicom_files)} file(s), {size_mb:.1f} MB) -> {final_path}",
+        level="log",
+    )
+
     # Optional mirrors — each is independently configured in config.json and
     # is a no-op when its block is absent or its destination is unreachable.
     # Both can run for the same study if both are configured. SSH routes by
     # PatientID; SMB routes by the first word of StudyDescription
     # (see mirror_to_smb).
     # Each returns None (not configured) / True / False; failures have already
-    # fired the Teams error webhook inside _mirror_failed. The outcome is also
-    # stamped on the success summary so the log channel never reads as a
-    # clean run when a mirror was skipped.
+    # fired the Teams error webhook inside _mirror_failed; successes have
+    # posted their "Transferred" log entry. The outcome is also stamped on
+    # the console summary.
     mirror_results = {
         "SSH": mirror_to_ssh(final_path, patient_id),
         "SMB": mirror_to_smb(final_path, study_desc),
@@ -537,7 +555,6 @@ def process_study(study_dir):
     shutil.rmtree(study_path)
     print("Cleanup complete.")
 
-    size_mb = final_path.stat().st_size / 1_000_000
     summary = f"Archived {len(dicom_files)} file(s) to {final_path} ({size_mb:.1f} MB)"
     for name, ok in mirror_results.items():
         if ok is not None:
@@ -566,4 +583,4 @@ if __name__ == "__main__":
             send_teams_alert(f"{type(e).__name__}: {e} (study dir: {sys.argv[1]})", level="error")
             raise  # keep the loud traceback in storescp's log
         if summary:
-            send_teams_alert(summary, level="log")
+            print(summary)

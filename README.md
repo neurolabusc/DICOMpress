@@ -251,7 +251,9 @@ same config file; each block is independently optional.
 
 `archive_study.py` can post to Microsoft Teams via incoming webhooks: an
 error alert when a study fails to archive (`TEAMS_WEBHOOK_ERROR`) and a
-per-study success summary (`TEAMS_WEBHOOK_LOG`). Both are **off by default**
+transfer log (`TEAMS_WEBHOOK_LOG`) with two entries per archive — `Received:`
+when the local `.tar.zst` is written and `Transferred:` when it lands on the
+SMB (or SSH) mirror. Both are **off by default**
 and independently optional — set one, both, or neither. No new Python
 dependency (standard-library `urllib` only).
 
@@ -285,16 +287,16 @@ configured mirror (SSH or SMB) fails for any reason — share not mounted,
 folder not creatable, copy or `scp` error. The local archive is still
 written in that case, and the failed mirror is queued for retry (see
 "Mirror retry queue" below); the alert names the archive and the current
-queue length. The success summary also ends with `; SMB mirror OK` /
-`; SMB mirror FAILED (queued for retry)` (likewise for SSH), plus
-`; N mirror(s) still pending retry` while the queue is non-empty, so the
-log channel never reads as a clean run when a mirror was skipped. When
-queued archives are eventually mirrored, one log-channel message lists
-them. Both legacy
+queue length. On the log channel every archive produces a `Received:` entry
+(filename, file count, size, local path) and, once it reaches a mirror, a
+`Transferred:` entry naming the destination — so a `Received:` with no
+matching `Transferred:` is an archive that has not been mirrored yet. When a
+queued archive is eventually mirrored its `Transferred:` entry is tagged
+`(retried from queue)`. Both legacy
 Office-365 connector URLs (`*.webhook.office.com`, HTTP 200) and
 Power-Automate workflow URLs (HTTP 202) are accepted.
 
-> **Note:** success summaries include the archive filename, which embeds the
+> **Note:** transfer-log entries include the archive filename, which embeds the
 > PatientName/PatientID DICOM tags. In research deployments these are
 > typically study codes rather than real names; if your scanners send real
 > patient identifiers, point `TEAMS_WEBHOOK_LOG` only at a channel whose
@@ -464,9 +466,9 @@ with the mirror type, the local archive path and the routing key
 
 Retry failures only print to the log (the original Teams alert already
 fired, and re-alerting per study while a share is down would be noise);
-every new failure alert and every success summary carries the pending
-count. A successful retry posts one `TEAMS_WEBHOOK_LOG` message listing
-the archives. Entries whose local archive has since been deleted, or
+every new failure alert carries the pending count. A successful retry
+posts that archive's `Transferred: … (retried from queue)` entry to
+`TEAMS_WEBHOOK_LOG`. Entries whose local archive has since been deleted, or
 whose mirror block was removed from `config.json`, are dropped with a
 Teams error so you know to handle that archive by hand. The queue file is
 plain text — inspect it with `cat`, or delete a line to abandon a retry.
