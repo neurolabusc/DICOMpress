@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import sys
 import json
 import fcntl
@@ -143,20 +144,41 @@ def _resolve_remote_dir(ssh_cfg, patient_id):
     return None, False
 
 
-class _QueueLock:
-    """flock on a sibling .lock file so concurrent --exec-on-eostudy processes
-    (two studies finishing within seconds of each other) don't interleave
-    writes to the retry queue."""
+class _FileLock:
+    """flock on a 0600 lock file beside the retry queue.
+
+    `_FileLock("queue")` serialises reads/writes of the queue file itself;
+    concurrent --exec-on-eostudy processes (two studies finishing within
+    seconds of each other) must not interleave writes. It is held only for
+    the few milliseconds of a read-modify-write.
+
+    `_FileLock("retry", blocking=False)` is a separate, long-held lock that
+    makes retry passes mutually exclusive without blocking enqueues: a slow
+    SMB transfer in one process must not stall another study's cleanup.
+    Non-blocking: `.acquired` is False when another pass is already running.
+    """
+
+    def __init__(self, name, blocking=True):
+        self._path = RETRY_QUEUE_PATH.with_name(f"pending-mirrors.{name}.lock")
+        self._blocking = blocking
+        self.acquired = False
 
     def __enter__(self):
-        RETRY_QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(RETRY_QUEUE_PATH.with_suffix(".lock"), "w")
-        fcntl.flock(self._fh, fcntl.LOCK_EX)
+        # The parent is ~/.config/dicompress — the same dir as config.json.
+        # 0700 if we have to create it; an existing dir is left alone.
+        RETRY_QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_EX | (0 if self._blocking else fcntl.LOCK_NB))
+            self.acquired = True
+        except BlockingIOError:
+            self.acquired = False
         return self
 
     def __exit__(self, *exc):
-        fcntl.flock(self._fh, fcntl.LOCK_UN)
-        self._fh.close()
+        if self.acquired:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+        os.close(self._fd)
 
 
 def _read_queue():
@@ -175,12 +197,27 @@ def _read_queue():
 
 
 def _write_queue(entries):
-    RETRY_QUEUE_PATH.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    """Atomically replace the queue file, mode 0600.
+
+    The queue holds archive paths and routing keys (StudyDescription /
+    PatientID), so it must not be world-readable; and a crash or disk error
+    mid-write must not leave it truncated — the local archives would still
+    exist but nothing would remember to mirror them. Write a 0600 temp file
+    beside it, fsync, then os.replace (atomic on the same filesystem).
+    Callers hold _FileLock("queue").
+    """
+    tmp = RETRY_QUEUE_PATH.with_suffix(".jsonl.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write("".join(json.dumps(e) + "\n" for e in entries))
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, RETRY_QUEUE_PATH)
 
 
 def _enqueue_retry(mirror, local_path, key):
     """Record a failed mirror for later retry. Returns the new queue length."""
-    with _QueueLock():
+    with _FileLock("queue"):
         entries = _read_queue()
         entries.append({
             "mirror": mirror,
@@ -342,19 +379,32 @@ MIRROR_FUNCS = {"ssh": mirror_to_ssh, "smb": mirror_to_smb}
 def retry_pending_mirrors():
     """Re-attempt every queued mirror. Returns (succeeded, still_pending).
 
-    Holds the queue lock for the whole pass so a concurrent study run can't
-    enqueue into a file we're about to rewrite. Entries whose local archive
-    has vanished, or whose mirror is no longer configured, are dropped with
-    a Teams error so the operator knows that archive needs manual handling.
-    Failures stay queued and print only (the original alert already fired).
-    Successes post one log-level summary.
+    Locking: the queue lock is taken only to snapshot the entries and again
+    to remove the finished ones, never across the mirror attempts
+    themselves — a slow or stuck SMB/scp transfer must not block another
+    study process from enqueueing its own failure (and so from finishing
+    its cleanup). A separate non-blocking "retry" lock makes passes mutually
+    exclusive, so entries are never removed by anyone else between our
+    snapshot and our removal; the only concurrent change possible is an
+    append, which the subtract-by-identity below preserves. If a pass is
+    already running we skip rather than wait.
+
+    Entries whose local archive has vanished, or whose mirror is no longer
+    configured, are dropped with a Teams error so the operator knows that
+    archive needs manual handling. Failures stay queued and print only (the
+    original alert already fired). Successes post one log-level summary.
     """
-    with _QueueLock():
-        entries = _read_queue()
+    with _FileLock("retry", blocking=False) as retry_lock:
+        with _FileLock("queue"):
+            entries = _read_queue()
         if not entries:
             return [], 0
+        if not retry_lock.acquired:
+            print(f"Retry queue: another retry pass is running; {len(entries)} pending.")
+            return [], len(entries)
+
         print(f"Retry queue: {len(entries)} pending mirror(s).")
-        succeeded, remaining = [], []
+        succeeded, finished = [], set()
         for entry in entries:
             mirror, archive, key = entry.get("mirror"), entry.get("archive"), entry.get("key")
             local_path = Path(archive or "")
@@ -364,6 +414,7 @@ def retry_pending_mirrors():
                     f"Retry queue: unknown mirror {mirror!r} for {archive}; dropping entry.",
                     level="error",
                 )
+                finished.add((mirror, archive))
                 continue
             if not local_path.is_file():
                 send_teams_alert(
@@ -371,6 +422,7 @@ def retry_pending_mirrors():
                     f"dropping {mirror} retry.",
                     level="error",
                 )
+                finished.add((mirror, archive))
                 continue
             result = func(local_path, key, retrying=True)
             if result is None:
@@ -379,11 +431,18 @@ def retry_pending_mirrors():
                     f"dropping retry for {archive} (copy it by hand if still wanted).",
                     level="error",
                 )
+                finished.add((mirror, archive))
             elif result:
                 succeeded.append(f"{local_path.name} -> {mirror.upper()}")
-            else:
-                remaining.append(entry)
-        _write_queue(remaining)
+                finished.add((mirror, archive))
+            # else: still failing — leave it in the queue.
+
+        with _FileLock("queue"):
+            remaining = [
+                e for e in _read_queue()
+                if (e.get("mirror"), e.get("archive")) not in finished
+            ]
+            _write_queue(remaining)
 
     if succeeded:
         send_teams_alert(

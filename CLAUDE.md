@@ -187,10 +187,15 @@ Captured here so a future AI assistant clearing context isn't surprised:
   is down for a day doesn't post one Teams error per pending archive per
   study. The pending count rides on every new failure alert and success
   summary instead; don't "improve" visibility by alerting on retry
-  failures. The queue is guarded by `fcntl.flock` on a sibling `.lock` file
-  because storescp can run two `--exec-on-eostudy` processes concurrently.
-  The routing key is stored because the study dir (and its DICOM metadata)
-  is gone by retry time.
+  failures. The routing key is stored because the study dir (and its DICOM
+  metadata) is gone by retry time. The queue file, its temp file and both
+  lock files are created 0600 (the dir 0700 if we create it) because entries
+  carry StudyDescription/PatientID; `_write_queue` goes through a temp file
+  + `os.replace` so a crash can't truncate it. Two `fcntl.flock` locks:
+  `queue` is held only across a read-modify-write; `retry` (non-blocking)
+  makes retry passes mutually exclusive and is the only lock held during
+  transfers, so a stuck SMB copy never blocks another study's enqueue and
+  cleanup. Don't collapse them into one lock.
 - `send_teams_alert()` deliberately catches all exceptions — the notifier
   must never break archiving. This is a sanctioned exception to the
   no-silent-swallow policy below, but it still prints to the console.
