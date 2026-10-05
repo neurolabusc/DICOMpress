@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 import json
+import fcntl
 import shlex
 import subprocess
 import pydicom
@@ -8,6 +9,7 @@ import tarfile
 import shutil
 import re
 import zstandard as zstd
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Deployed alongside this script (both live in scripts/ and are copied to
@@ -17,6 +19,9 @@ from teams_notifier import check_and_prompt_teams_webhooks, send_teams_alert
 # --- Configuration ---
 TEMP_DICOM_ROOT = Path("/tmp/dicom_incoming") # Should match storescp -od
 CONFIG_PATH = Path.home() / ".config" / "dicompress" / "config.json"
+# Mirror attempts that failed are queued here (one JSON object per line) and
+# retried at the end of every later study run, or via `--retry-mirrors`.
+RETRY_QUEUE_PATH = CONFIG_PATH.with_name("pending-mirrors.jsonl")
 
 # Read config once at import. A missing file is fine (no mirror, default
 # base_dir). Malformed JSON or a group/world-writable config file logs a
@@ -138,32 +143,96 @@ def _resolve_remote_dir(ssh_cfg, patient_id):
     return None, False
 
 
-def _mirror_failed(message, local_path):
-    """Log a mirror failure and raise it to the Teams error channel.
+class _QueueLock:
+    """flock on a sibling .lock file so concurrent --exec-on-eostudy processes
+    (two studies finishing within seconds of each other) don't interleave
+    writes to the retry queue."""
+
+    def __enter__(self):
+        RETRY_QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(RETRY_QUEUE_PATH.with_suffix(".lock"), "w")
+        fcntl.flock(self._fh, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self._fh, fcntl.LOCK_UN)
+        self._fh.close()
+
+
+def _read_queue():
+    if not RETRY_QUEUE_PATH.exists():
+        return []
+    entries = []
+    for line in RETRY_QUEUE_PATH.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            print(f"Retry queue: dropping malformed line {line!r}: {e}")
+    return entries
+
+
+def _write_queue(entries):
+    RETRY_QUEUE_PATH.write_text("".join(json.dumps(e) + "\n" for e in entries))
+
+
+def _enqueue_retry(mirror, local_path, key):
+    """Record a failed mirror for later retry. Returns the new queue length."""
+    with _QueueLock():
+        entries = _read_queue()
+        entries.append({
+            "mirror": mirror,
+            "archive": str(local_path),
+            "key": key,
+            "queued": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+        _write_queue(entries)
+        return len(entries)
+
+
+def _mirror_failed(message, local_path, mirror, key, retrying):
+    """Log a mirror failure; on a first attempt also queue it and raise it to
+    the Teams error channel.
 
     A mirror that silently skips looks identical to one that succeeded from
     the Teams side (the per-study success summary still posts), which let
     un-mirrored archives go unnoticed in production. Every non-success exit
     from mirror_to_ssh / mirror_to_smb must come through here.
+
+    On a retry (`retrying=True`) the entry is already in the queue and the
+    operator was already alerted, so we only print — otherwise every later
+    study would re-alert for every pending archive while the share is down.
     """
     print(message)
-    send_teams_alert(f"{message} (archive kept locally at {local_path})", level="error")
+    if retrying:
+        return False
+    pending = _enqueue_retry(mirror, local_path, key)
+    send_teams_alert(
+        f"{message} (archive kept locally at {local_path}; "
+        f"queued for retry, {pending} pending)",
+        level="error",
+    )
     return False
 
 
-def mirror_to_ssh(local_path, patient_id):
+def mirror_to_ssh(local_path, patient_id, retrying=False):
     """Optionally mirror the archive to a remote SSH server.
 
     Returns None when not configured, True on success, False on failure
-    (after alerting via _mirror_failed).
+    (after alerting + queueing via _mirror_failed, unless `retrying`).
     """
     ssh_cfg = CONFIG.get("ssh") or {}
     if not ssh_cfg.get("host") or not ssh_cfg.get("user"):
         return None
 
+    def failed(message):
+        return _mirror_failed(message, local_path, "ssh", patient_id, retrying)
+
     remote_dir, is_guest = _resolve_remote_dir(ssh_cfg, patient_id)
     if not remote_dir:
-        return _mirror_failed("SSH mirror: no remote directory resolved; skipping.", local_path)
+        return failed("SSH mirror: no remote directory resolved; skipping.")
 
     remote_target = f"{remote_dir.rstrip('/')}/{local_path.name}"
     scp_cmd = [
@@ -174,18 +243,18 @@ def mirror_to_ssh(local_path, patient_id):
         f"{ssh_cfg['user']}@{ssh_cfg['host']}:{remote_target}",
     ]
     if subprocess.run(scp_cmd).returncode != 0:
-        return _mirror_failed("SSH mirror: scp failed; skipping chmod.", local_path)
+        return failed("SSH mirror: scp failed; skipping chmod.")
 
     mode = "0666" if is_guest else "0664"
     chmod_cmd = _ssh_base(ssh_cfg) + [f"chmod {mode} {shlex.quote(remote_target)}"]
     if subprocess.run(chmod_cmd).returncode != 0:
-        return _mirror_failed(f"SSH mirror: chmod failed on {remote_target}.", local_path)
+        return failed(f"SSH mirror: chmod failed on {remote_target}.")
 
     print(f"Mirrored to {ssh_cfg['user']}@{ssh_cfg['host']}:{remote_target}")
     return True
 
 
-def mirror_to_smb(local_path, study_desc):
+def mirror_to_smb(local_path, study_desc, retrying=False):
     """Optionally mirror the archive to an SMB share mounted locally.
 
     Routing on SMB is by the first word of `study_desc` (the sanitised
@@ -205,21 +274,24 @@ def mirror_to_smb(local_path, study_desc):
     with `_netdev,nofail`). If the mount is missing — share offline,
     firewall blocking, network down — we log, fire the Teams error
     webhook, and skip; local archiving and other mirrors are unaffected.
-    A later study will pick up the mount once it returns, but the skipped
-    archive is NOT retried — the alert is what tells an operator to copy
-    it over by hand.
+    The failed archive is queued (see RETRY_QUEUE_PATH) and retried at the
+    end of every later study run and by `--retry-mirrors`, so it is mirrored
+    automatically once the share returns.
 
     Returns None when not configured, True on success, False on failure
-    (after alerting via _mirror_failed).
+    (after alerting + queueing via _mirror_failed, unless `retrying`).
     """
     smb_cfg = CONFIG.get("smb") or {}
     mount_point = smb_cfg.get("mount_point")
     if not mount_point:
         return None
 
+    def failed(message):
+        return _mirror_failed(message, local_path, "smb", study_desc, retrying)
+
     mp = Path(mount_point)
     if not mp.is_mount():
-        return _mirror_failed(f"SMB mirror: {mount_point} is not mounted; skipping.", local_path)
+        return failed(f"SMB mirror: {mount_point} is not mounted; skipping.")
 
     # study_desc is already sanitised (whitespace -> '-'), so split on '-'
     # to recover the original first word. The '..' guard is defence-in-depth:
@@ -232,7 +304,7 @@ def mirror_to_smb(local_path, study_desc):
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        return _mirror_failed(f"SMB mirror: could not create {dest}: {e}", local_path)
+        return failed(f"SMB mirror: could not create {dest}: {e}")
 
     # Atomic publish: write to <name>.part then rename. Without this, a CIFS
     # disconnect mid-copy would leave a partial .tar.zst at the final name,
@@ -251,7 +323,7 @@ def mirror_to_smb(local_path, study_desc):
             tmp.unlink(missing_ok=True)
         except OSError as cleanup_err:
             print(f"SMB mirror: could not remove {tmp}: {cleanup_err}")
-        return _mirror_failed(f"SMB mirror: copy to {target} failed: {e}", local_path)
+        return failed(f"SMB mirror: copy to {target} failed: {e}")
 
     # 0666 unconditionally — per-lab access lives in server-side ACLs.
     # cifs may ignore POSIX chmod entirely; silently fine if it doesn't stick.
@@ -262,6 +334,64 @@ def mirror_to_smb(local_path, study_desc):
 
     print(f"Mirrored to SMB: {target}")
     return True
+
+
+MIRROR_FUNCS = {"ssh": mirror_to_ssh, "smb": mirror_to_smb}
+
+
+def retry_pending_mirrors():
+    """Re-attempt every queued mirror. Returns (succeeded, still_pending).
+
+    Holds the queue lock for the whole pass so a concurrent study run can't
+    enqueue into a file we're about to rewrite. Entries whose local archive
+    has vanished, or whose mirror is no longer configured, are dropped with
+    a Teams error so the operator knows that archive needs manual handling.
+    Failures stay queued and print only (the original alert already fired).
+    Successes post one log-level summary.
+    """
+    with _QueueLock():
+        entries = _read_queue()
+        if not entries:
+            return [], 0
+        print(f"Retry queue: {len(entries)} pending mirror(s).")
+        succeeded, remaining = [], []
+        for entry in entries:
+            mirror, archive, key = entry.get("mirror"), entry.get("archive"), entry.get("key")
+            local_path = Path(archive or "")
+            func = MIRROR_FUNCS.get(mirror)
+            if func is None:
+                send_teams_alert(
+                    f"Retry queue: unknown mirror {mirror!r} for {archive}; dropping entry.",
+                    level="error",
+                )
+                continue
+            if not local_path.is_file():
+                send_teams_alert(
+                    f"Retry queue: local archive {archive} no longer exists; "
+                    f"dropping {mirror} retry.",
+                    level="error",
+                )
+                continue
+            result = func(local_path, key, retrying=True)
+            if result is None:
+                send_teams_alert(
+                    f"Retry queue: {mirror} mirror is no longer configured; "
+                    f"dropping retry for {archive} (copy it by hand if still wanted).",
+                    level="error",
+                )
+            elif result:
+                succeeded.append(f"{local_path.name} -> {mirror.upper()}")
+            else:
+                remaining.append(entry)
+        _write_queue(remaining)
+
+    if succeeded:
+        send_teams_alert(
+            f"Retried {len(succeeded)} queued mirror(s) OK: {'; '.join(succeeded)}"
+            + (f" ({len(remaining)} still pending)" if remaining else ""),
+            level="log",
+        )
+    return succeeded, len(remaining)
 
 
 def process_study(study_dir):
@@ -352,11 +482,24 @@ def process_study(study_dir):
     summary = f"Archived {len(dicom_files)} file(s) to {final_path} ({size_mb:.1f} MB)"
     for name, ok in mirror_results.items():
         if ok is not None:
-            summary += f"; {name} mirror {'OK' if ok else 'FAILED'}"
+            summary += f"; {name} mirror {'OK' if ok else 'FAILED (queued for retry)'}"
+
+    # Drain earlier failures now that this study is done. A share that came
+    # back since the last study gets its backlog without any cron involvement.
+    succeeded, pending = retry_pending_mirrors()
+    if succeeded:
+        summary += f"; retried {len(succeeded)} queued mirror(s) OK"
+    if pending:
+        summary += f"; {pending} mirror(s) still pending retry"
     return summary
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
+    if len(sys.argv) > 1 and sys.argv[1] == "--retry-mirrors":
+        # Cron/manual entry point: drain the retry queue without a study.
+        check_and_prompt_teams_webhooks()
+        succeeded, pending = retry_pending_mirrors()
+        print(f"Retry: {len(succeeded)} succeeded, {pending} still pending.")
+    elif len(sys.argv) > 1:
         check_and_prompt_teams_webhooks()
         try:
             summary = process_study(sys.argv[1])

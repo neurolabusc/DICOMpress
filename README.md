@@ -283,10 +283,14 @@ the console and never interrupt archiving or mirroring.
 The error channel fires when a study fails to archive **and** when a
 configured mirror (SSH or SMB) fails for any reason — share not mounted,
 folder not creatable, copy or `scp` error. The local archive is still
-written in that case; the alert names it so an operator can copy it over
-by hand, because skipped mirrors are not retried. The success summary also
-ends with `; SMB mirror OK` / `; SMB mirror FAILED` (likewise for SSH) so
-the log channel never reads as a clean run when a mirror was skipped. Both legacy
+written in that case, and the failed mirror is queued for retry (see
+"Mirror retry queue" below); the alert names the archive and the current
+queue length. The success summary also ends with `; SMB mirror OK` /
+`; SMB mirror FAILED (queued for retry)` (likewise for SSH), plus
+`; N mirror(s) still pending retry` while the queue is non-empty, so the
+log channel never reads as a clean run when a mirror was skipped. When
+queued archives are eventually mirrored, one log-channel message lists
+them. Both legacy
 Office-365 connector URLs (`*.webhook.office.com`, HTTP 200) and
 Power-Automate workflow URLs (HTTP 202) are accepted.
 
@@ -437,7 +441,35 @@ Folder semantics worth knowing without opening that file:
   `SMB mirror: /mnt/dicom-mirror is not mounted; skipping`, posts to
   `TEAMS_WEBHOOK_ERROR` if configured, and the rest of the pipeline
   (local archive, SSH mirror if any) is unaffected. The skipped archive
-  is not retried on the next study — copy it over by hand.
+  is queued and mirrored automatically once the share is back — see
+  "Mirror retry queue" below.
+
+### Mirror retry queue
+
+A mirror that fails (SSH or SMB, any reason) is recorded in
+`~/.config/dicompress/pending-mirrors.jsonl` — one JSON line per archive
+with the mirror type, the local archive path and the routing key
+(StudyDescription for SMB, PatientID for SSH). The queue is drained
+
+- at the end of **every later study run**, after that study's own
+  mirrors, so a share that came back since the last scan gets its backlog
+  with no extra setup; and
+- on demand with `archive_study.py --retry-mirrors`, which is what to put
+  in cron for sites where studies are infrequent:
+
+```bash
+# retry queued mirrors every 15 minutes (service user's crontab)
+*/15 * * * * /home/radmin/DICOMpress-venv/bin/python3 /usr/local/bin/archive_study.py --retry-mirrors >> /home/radmin/storescp.log 2>&1
+```
+
+Retry failures only print to the log (the original Teams alert already
+fired, and re-alerting per study while a share is down would be noise);
+every new failure alert and every success summary carries the pending
+count. A successful retry posts one `TEAMS_WEBHOOK_LOG` message listing
+the archives. Entries whose local archive has since been deleted, or
+whose mirror block was removed from `config.json`, are dropped with a
+Teams error so you know to handle that archive by hand. The queue file is
+plain text — inspect it with `cat`, or delete a line to abandon a retry.
 
 
 ## Project layout

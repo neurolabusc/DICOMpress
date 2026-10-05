@@ -178,6 +178,19 @@ Captured here so a future AI assistant clearing context isn't surprised:
   silent `print(...); return` on the not-mounted path let un-mirrored
   archives go unnoticed in production — don't add a new failure `return`
   in either mirror function that bypasses `_mirror_failed`.
+- **Mirror retry queue** (`~/.config/dicompress/pending-mirrors.jsonl`,
+  `RETRY_QUEUE_PATH`): `_mirror_failed` appends a JSON line (mirror type,
+  archive path, routing key) on a first-attempt failure. `retry_pending_mirrors()`
+  drains it at the end of `process_study()` and via `--retry-mirrors`.
+  Retries call the mirror functions with `retrying=True`, which makes
+  `_mirror_failed` print-only — no re-alert, no re-enqueue — so a share that
+  is down for a day doesn't post one Teams error per pending archive per
+  study. The pending count rides on every new failure alert and success
+  summary instead; don't "improve" visibility by alerting on retry
+  failures. The queue is guarded by `fcntl.flock` on a sibling `.lock` file
+  because storescp can run two `--exec-on-eostudy` processes concurrently.
+  The routing key is stored because the study dir (and its DICOM metadata)
+  is gone by retry time.
 - `send_teams_alert()` deliberately catches all exceptions — the notifier
   must never break archiving. This is a sanctioned exception to the
   no-silent-swallow policy below, but it still prints to the console.
@@ -191,7 +204,8 @@ Captured here so a future AI assistant clearing context isn't surprised:
 
 ## Files
 
-- `scripts/archive_study.py` — the Python side, run per study.
+- `scripts/archive_study.py` — the Python side, run per study; also
+  `--retry-mirrors` for cron/manual draining of the mirror retry queue.
 - `scripts/teams_notifier.py` — optional Teams webhook alerts (stdlib only),
   imported by `archive_study.py`; deploy the two files together.
 - `scripts/start_storescp.sh` — launches storescp; `PYTHON_BIN`/`STORES_BIN`

@@ -310,9 +310,10 @@ The script ran `Path.is_mount()` and got `False`. Either the automount
 hasn't been triggered yet (rare — usually triggered by the very call
 that checks), or the underlying mount has failed. If `TEAMS_WEBHOOK_ERROR`
 is set, the same message is posted to Teams with the local archive path,
-and the study's success summary ends with `SMB mirror FAILED`. The
-archive is not re-mirrored automatically once the share returns — copy
-it over by hand.
+and the study's success summary ends with `SMB mirror FAILED (queued for
+retry)`. The archive is queued in `~/.config/dicompress/pending-mirrors.jsonl`
+and copied automatically by the next study run after the share returns,
+or by `archive_study.py --retry-mirrors` (see README, "Mirror retry queue").
 
 ```bash
 sudo systemctl status mnt-dicom\\x2dmirror.automount
