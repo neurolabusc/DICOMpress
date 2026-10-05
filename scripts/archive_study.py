@@ -138,16 +138,32 @@ def _resolve_remote_dir(ssh_cfg, patient_id):
     return None, False
 
 
+def _mirror_failed(message, local_path):
+    """Log a mirror failure and raise it to the Teams error channel.
+
+    A mirror that silently skips looks identical to one that succeeded from
+    the Teams side (the per-study success summary still posts), which let
+    un-mirrored archives go unnoticed in production. Every non-success exit
+    from mirror_to_ssh / mirror_to_smb must come through here.
+    """
+    print(message)
+    send_teams_alert(f"{message} (archive kept locally at {local_path})", level="error")
+    return False
+
+
 def mirror_to_ssh(local_path, patient_id):
-    """Optionally mirror the archive to a remote SSH server. No-op if not configured."""
+    """Optionally mirror the archive to a remote SSH server.
+
+    Returns None when not configured, True on success, False on failure
+    (after alerting via _mirror_failed).
+    """
     ssh_cfg = CONFIG.get("ssh") or {}
     if not ssh_cfg.get("host") or not ssh_cfg.get("user"):
-        return
+        return None
 
     remote_dir, is_guest = _resolve_remote_dir(ssh_cfg, patient_id)
     if not remote_dir:
-        print("SSH mirror: no remote directory resolved; skipping.")
-        return
+        return _mirror_failed("SSH mirror: no remote directory resolved; skipping.", local_path)
 
     remote_target = f"{remote_dir.rstrip('/')}/{local_path.name}"
     scp_cmd = [
@@ -158,16 +174,15 @@ def mirror_to_ssh(local_path, patient_id):
         f"{ssh_cfg['user']}@{ssh_cfg['host']}:{remote_target}",
     ]
     if subprocess.run(scp_cmd).returncode != 0:
-        print("SSH mirror: scp failed; skipping chmod.")
-        return
+        return _mirror_failed("SSH mirror: scp failed; skipping chmod.", local_path)
 
     mode = "0666" if is_guest else "0664"
     chmod_cmd = _ssh_base(ssh_cfg) + [f"chmod {mode} {shlex.quote(remote_target)}"]
     if subprocess.run(chmod_cmd).returncode != 0:
-        print("SSH mirror: chmod failed.")
-        return
+        return _mirror_failed(f"SSH mirror: chmod failed on {remote_target}.", local_path)
 
     print(f"Mirrored to {ssh_cfg['user']}@{ssh_cfg['host']}:{remote_target}")
+    return True
 
 
 def mirror_to_smb(local_path, study_desc):
@@ -188,19 +203,23 @@ def mirror_to_smb(local_path, study_desc):
 
     The mount itself is managed outside this script (typically /etc/fstab
     with `_netdev,nofail`). If the mount is missing — share offline,
-    firewall blocking, network down — we log and skip; local archiving
-    and other mirrors are unaffected. A later study will pick up the
-    mount once it returns.
+    firewall blocking, network down — we log, fire the Teams error
+    webhook, and skip; local archiving and other mirrors are unaffected.
+    A later study will pick up the mount once it returns, but the skipped
+    archive is NOT retried — the alert is what tells an operator to copy
+    it over by hand.
+
+    Returns None when not configured, True on success, False on failure
+    (after alerting via _mirror_failed).
     """
     smb_cfg = CONFIG.get("smb") or {}
     mount_point = smb_cfg.get("mount_point")
     if not mount_point:
-        return
+        return None
 
     mp = Path(mount_point)
     if not mp.is_mount():
-        print(f"SMB mirror: {mount_point} is not mounted; skipping.")
-        return
+        return _mirror_failed(f"SMB mirror: {mount_point} is not mounted; skipping.", local_path)
 
     # study_desc is already sanitised (whitespace -> '-'), so split on '-'
     # to recover the original first word. The '..' guard is defence-in-depth:
@@ -213,8 +232,7 @@ def mirror_to_smb(local_path, study_desc):
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        print(f"SMB mirror: could not create {dest}: {e}")
-        return
+        return _mirror_failed(f"SMB mirror: could not create {dest}: {e}", local_path)
 
     # Atomic publish: write to <name>.part then rename. Without this, a CIFS
     # disconnect mid-copy would leave a partial .tar.zst at the final name,
@@ -226,9 +244,14 @@ def mirror_to_smb(local_path, study_desc):
         shutil.copy(local_path, tmp)
         tmp.rename(target)
     except OSError as e:
-        print(f"SMB mirror: copy failed: {e}")
-        tmp.unlink(missing_ok=True)
-        return
+        # Best-effort cleanup of the .part file. During a CIFS outage the
+        # unlink can fail too; that must not mask the original copy error
+        # or bypass _mirror_failed() by escaping to the top-level handler.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError as cleanup_err:
+            print(f"SMB mirror: could not remove {tmp}: {cleanup_err}")
+        return _mirror_failed(f"SMB mirror: copy to {target} failed: {e}", local_path)
 
     # 0666 unconditionally — per-lab access lives in server-side ACLs.
     # cifs may ignore POSIX chmod entirely; silently fine if it doesn't stick.
@@ -238,6 +261,7 @@ def mirror_to_smb(local_path, study_desc):
         pass
 
     print(f"Mirrored to SMB: {target}")
+    return True
 
 
 def process_study(study_dir):
@@ -311,15 +335,25 @@ def process_study(study_dir):
     # Both can run for the same study if both are configured. SSH routes by
     # PatientID; SMB routes by the first word of StudyDescription
     # (see mirror_to_smb).
-    mirror_to_ssh(final_path, patient_id)
-    mirror_to_smb(final_path, study_desc)
+    # Each returns None (not configured) / True / False; failures have already
+    # fired the Teams error webhook inside _mirror_failed. The outcome is also
+    # stamped on the success summary so the log channel never reads as a
+    # clean run when a mirror was skipped.
+    mirror_results = {
+        "SSH": mirror_to_ssh(final_path, patient_id),
+        "SMB": mirror_to_smb(final_path, study_desc),
+    }
 
     # Cleanup: Delete original DICOMs
     shutil.rmtree(study_path)
     print("Cleanup complete.")
 
     size_mb = final_path.stat().st_size / 1_000_000
-    return f"Archived {len(dicom_files)} file(s) to {final_path} ({size_mb:.1f} MB)"
+    summary = f"Archived {len(dicom_files)} file(s) to {final_path} ({size_mb:.1f} MB)"
+    for name, ok in mirror_results.items():
+        if ok is not None:
+            summary += f"; {name} mirror {'OK' if ok else 'FAILED'}"
+    return summary
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:

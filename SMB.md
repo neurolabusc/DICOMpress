@@ -308,7 +308,11 @@ ls -la /mnt/dicom-mirror/            # should now list contents
 
 The script ran `Path.is_mount()` and got `False`. Either the automount
 hasn't been triggered yet (rare — usually triggered by the very call
-that checks), or the underlying mount has failed.
+that checks), or the underlying mount has failed. If `TEAMS_WEBHOOK_ERROR`
+is set, the same message is posted to Teams with the local archive path,
+and the study's success summary ends with `SMB mirror FAILED`. The
+archive is not re-mirrored automatically once the share returns — copy
+it over by hand.
 
 ```bash
 sudo systemctl status mnt-dicom\\x2dmirror.automount
@@ -318,7 +322,7 @@ sudo dmesg | grep -iE "cifs|smb" | tail -10
 
 Common causes: server unreachable, credentials rotated, firewall change.
 
-### `SMB mirror: copy failed: [Errno 13] Permission denied`
+### `SMB mirror: copy to <target> failed: [Errno 13] Permission denied`
 
 Mount-point ownership mismatch — the script runs as `radmin` but the
 mount was created with `uid=root` (or `uid=` was omitted). Re-check the
@@ -330,7 +334,7 @@ sudo mount /mnt/dicom-mirror
 ls -ld /mnt/dicom-mirror             # owner should match the receiver's service account
 ```
 
-### `SMB mirror: copy failed: [Errno 5] Input/output error`
+### `SMB mirror: copy to <target> failed: [Errno 5] Input/output error`
 
 CIFS connection broke mid-write (server crashed, network partition).
 Usually self-healing — the kernel reconnects on the next operation, so
