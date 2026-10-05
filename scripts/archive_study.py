@@ -281,25 +281,33 @@ def mirror_to_ssh(local_path, patient_id, retrying=False):
     def failed(message):
         return _mirror_failed(message, local_path, "ssh", patient_id, retrying)
 
-    remote_dir, is_guest = _resolve_remote_dir(ssh_cfg, patient_id)
-    if not remote_dir:
-        return failed("SSH mirror: no remote directory resolved; skipping.")
+    # Non-zero exit codes are handled per step below. subprocess.run() can
+    # also *raise* OSError (ssh/scp binary missing or not executable, fork
+    # failure); that must be a mirror failure like any other — queued on a
+    # first attempt, non-fatal to a retry pass — not an escape to the
+    # top-level handler that bypasses the queue.
+    try:
+        remote_dir, is_guest = _resolve_remote_dir(ssh_cfg, patient_id)
+        if not remote_dir:
+            return failed("SSH mirror: no remote directory resolved; skipping.")
 
-    remote_target = f"{remote_dir.rstrip('/')}/{local_path.name}"
-    scp_cmd = [
-        "scp",
-        "-P", str(ssh_cfg.get("port", 22)),
-        *SSH_OPTS,
-        str(local_path),
-        f"{ssh_cfg['user']}@{ssh_cfg['host']}:{remote_target}",
-    ]
-    if subprocess.run(scp_cmd).returncode != 0:
-        return failed("SSH mirror: scp failed; skipping chmod.")
+        remote_target = f"{remote_dir.rstrip('/')}/{local_path.name}"
+        scp_cmd = [
+            "scp",
+            "-P", str(ssh_cfg.get("port", 22)),
+            *SSH_OPTS,
+            str(local_path),
+            f"{ssh_cfg['user']}@{ssh_cfg['host']}:{remote_target}",
+        ]
+        if subprocess.run(scp_cmd).returncode != 0:
+            return failed("SSH mirror: scp failed; skipping chmod.")
 
-    mode = "0666" if is_guest else "0664"
-    chmod_cmd = _ssh_base(ssh_cfg) + [f"chmod {mode} {shlex.quote(remote_target)}"]
-    if subprocess.run(chmod_cmd).returncode != 0:
-        return failed(f"SSH mirror: chmod failed on {remote_target}.")
+        mode = "0666" if is_guest else "0664"
+        chmod_cmd = _ssh_base(ssh_cfg) + [f"chmod {mode} {shlex.quote(remote_target)}"]
+        if subprocess.run(chmod_cmd).returncode != 0:
+            return failed(f"SSH mirror: chmod failed on {remote_target}.")
+    except OSError as e:
+        return failed(f"SSH mirror: could not run ssh/scp: {e}")
 
     return _mirror_succeeded(
         "ssh", local_path, f"{ssh_cfg['user']}@{ssh_cfg['host']}:{remote_target}", retrying
